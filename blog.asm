@@ -167,6 +167,7 @@ section .data
     html_tail:
         db '<div class="foot">Justin Catalana // '
         db 'served by x86-64 assembly // '
+        db '<a href="https://github.com/justincatalana/web-asm" style="color:#ff6600;">source</a> // '
         db 'records: '
     html_tail_len equ $ - html_tail
 
