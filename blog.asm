@@ -83,7 +83,7 @@ section .data
     sockaddr:
         dw 2                    ; AF_INET
         dw LISTEN_PORT
-        dd 0                    ; INADDR_ANY
+        dd 0x010012AC           ; 172.18.0.1 (Docker bridge - not public)
         dq 0
 
     ; Strings for header/URL parsing
