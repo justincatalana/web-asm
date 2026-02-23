@@ -75,7 +75,7 @@
 %define O_TRUNC         512
 
 section .data
-    db_path:     db "blog.dat", 0
+    db_path:     db "/data/blog.dat", 0
 
     env_token:   db "BLOG_TOKEN=", 0
     env_token_len equ $ - env_token - 1
@@ -83,7 +83,7 @@ section .data
     sockaddr:
         dw 2                    ; AF_INET
         dw LISTEN_PORT
-        dd 0x010012AC           ; 172.18.0.1 (Docker bridge - not public)
+        dd 0x00000000           ; 0.0.0.0 (INADDR_ANY - bind to all interfaces)
         dq 0
 
     ; Strings for header/URL parsing
@@ -107,20 +107,20 @@ section .data
         db '<style>'
         db 'body{background:#0a0a0a;color:#c0c0c0;font-family:monospace;'
         db 'max-width:700px;margin:40px auto;padding:0 20px;}'
-        db 'h1{color:#ff6600;text-shadow:0 0 10px #ff3300;}'
+        db 'h1{color:#66b3ff;text-shadow:0 0 10px #3399ff;}'
         db 'h2{color:#00ff41;}'
         db '.post{border:1px solid #333;padding:15px;margin:15px 0;'
         db 'background:#111;}'
-        db '.post h3{color:#ff6600;margin:0 0 5px 0;}'
+        db '.post h3{color:#66b3ff;margin:0 0 5px 0;}'
         db '.post .ts{color:#666;font-size:0.8em;}'
         db '.post .body{margin-top:10px;white-space:pre-wrap;}'
         db 'form{background:#111;border:1px solid #333;padding:20px;margin:20px 0;}'
         db 'input,textarea{width:100%;background:#1a1a1a;color:#c0c0c0;'
         db 'border:1px solid #444;padding:8px;margin:5px 0 15px 0;'
         db 'font-family:monospace;box-sizing:border-box;}'
-        db 'button{background:#ff6600;color:#000;border:none;padding:10px 20px;'
+        db 'button{background:#66b3ff;color:#000;border:none;padding:10px 20px;'
         db 'cursor:pointer;font-family:monospace;font-weight:bold;}'
-        db 'button:hover{background:#ff8800;}'
+        db 'button:hover{background:#80c0ff;}'
         db '.hdr{border-bottom:1px solid #333;padding-bottom:10px;margin-bottom:20px;}'
         db '.foot{color:#444;margin-top:40px;border-top:1px solid #222;'
         db 'padding-top:10px;font-size:0.8em;}'
@@ -167,7 +167,7 @@ section .data
     html_tail:
         db '<div class="foot">Justin Catalana // '
         db 'served by x86-64 assembly // '
-        db '<a href="https://github.com/justincatalana/web-asm" style="color:#ff6600;">source</a> // '
+        db '<a href="https://github.com/justincatalana/web-asm" style="color:#66b3ff;">source</a> // '
         db 'records: '
     html_tail_len equ $ - html_tail
 
