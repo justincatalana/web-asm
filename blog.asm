@@ -70,12 +70,21 @@
 %define SYS_CLOCK_GETTIME 228
 
 ; open flags
+%define O_RDONLY        0
+%define O_WRONLY        1
 %define O_RDWR          2
 %define O_CREAT         64
 %define O_TRUNC         512
 
 section .data
     db_path:     db "/data/blog.dat", 0
+    bio_path:    db "/data/bio.txt", 0
+
+    default_bio:
+        db 'Served by hand-crafted x86-64 assembly. '
+        db 'Database: flat binary file with hash-chained records. '
+        db 'No libc. No libraries. Only syscalls.'
+    default_bio_len equ $ - default_bio
 
     env_token:   db "BLOG_TOKEN=", 0
     env_token_len equ $ - env_token - 1
@@ -98,6 +107,18 @@ section .data
     str_token_eq:
         db 'token=', 0
     str_token_eq_len equ $ - str_token_eq - 1
+
+    str_get_bio:
+        db 'GET /bio', 0
+    str_get_bio_len equ $ - str_get_bio - 1
+
+    str_post_bio:
+        db 'POST /bio', 0
+    str_post_bio_len equ $ - str_post_bio - 1
+
+    str_content_length:
+        db 'Content-Length: ', 0
+    str_content_length_len equ $ - str_content_length - 1
 
     ; ---- HTML TEMPLATES ----
 
@@ -126,10 +147,15 @@ section .data
         db 'padding-top:10px;font-size:0.8em;}'
         db '</style></head><body>'
         db '<div class="hdr"><h1>Justin Catalana</h1>'
-        db '<p style="color:#777;">Served by hand-crafted x86-64 assembly. '
-        db 'Database: flat binary file with hash-chained records. '
-        db 'No libc. No libraries. Only syscalls.</p></div>'
     html_head_len equ $ - html_head
+
+    html_bio_open:
+        db '<p style="color:#777;">'
+    html_bio_open_len equ $ - html_bio_open
+
+    html_bio_close:
+        db '</p></div>'
+    html_bio_close_len equ $ - html_bio_close
 
     ; Form: split around the token value so we can inject it
     html_form_pre:
@@ -225,6 +251,31 @@ section .data
         db 'NO AUTH TOKEN CONFIGURED', 13, 10, 13, 10
     http_503_len equ $ - http_503
 
+    http_200_plain:
+        db 'HTTP/1.1 200 OK', 13, 10
+        db 'Content-Type: text/plain; charset=utf-8', 13, 10
+        db 'Connection: close', 13, 10
+        db 13, 10
+    http_200_plain_len equ $ - http_200_plain
+
+    http_200_bio_updated:
+        db 'HTTP/1.1 200 OK', 13, 10
+        db 'Content-Type: text/plain; charset=utf-8', 13, 10
+        db 'Connection: close', 13, 10
+        db 'Content-Length: 11', 13, 10
+        db 13, 10
+        db 'Bio updated'
+    http_200_bio_updated_len equ $ - http_200_bio_updated
+
+    http_403_plain:
+        db 'HTTP/1.1 403 Forbidden', 13, 10
+        db 'Content-Type: text/plain; charset=utf-8', 13, 10
+        db 'Connection: close', 13, 10
+        db 'Content-Length: 13', 13, 10
+        db 13, 10
+        db '403 Forbidden'
+    http_403_plain_len equ $ - http_403_plain
+
     crlf: db 13, 10, 13, 10
     crlf_len equ $ - crlf
 
@@ -263,6 +314,8 @@ section .bss
     auth_token_len  resq 1
     auth_enabled    resb 1
     envp_save       resq 1
+    bio_buffer      resb 512
+    bio_length      resq 1
 
 section .text
     global _start
@@ -348,9 +401,14 @@ _start:
     lea rdi, [rel read_buf]
     mov byte [rdi + rax], 0
 
-    ; Route: POST, GET /admin, or public
+    ; Route: POST, GET /admin, GET /bio, or public
     cmp byte [rdi], 'P'
-    je .route_post
+    je .check_post_routes
+
+    ; Check GET /bio
+    call check_get_bio_route
+    test eax, eax
+    jnz .handle_get_bio
 
     call check_admin_route
     test eax, eax
@@ -360,6 +418,91 @@ _start:
     mov edi, 0
     call render_blog
     jmp .send_response
+
+.handle_get_bio:
+    call load_bio               ; rax = bio ptr, rcx = bio len
+    mov r13, rax
+    mov r14, rcx
+
+    pop r15                     ; client fd
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel http_200_plain]
+    mov rdx, http_200_plain_len
+    syscall
+
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    mov rsi, r13
+    mov rdx, r14
+    syscall
+
+    mov rax, SYS_CLOSE
+    mov rdi, r15
+    syscall
+    jmp .accept_loop
+
+.check_post_routes:
+    ; Check POST /bio
+    call check_post_bio_route
+    test eax, eax
+    jnz .handle_post_bio
+    jmp .route_post
+
+.handle_post_bio:
+    ; Require auth
+    cmp byte [rel auth_enabled], 1
+    jne .bio_403
+
+    lea rdi, [rel read_buf]
+    call check_post_auth
+    test eax, eax
+    jz .bio_403
+
+    ; Find Content-Length
+    lea rdi, [rel read_buf]
+    call find_content_length
+    test rax, rax
+    jle .close_client
+    cmp rax, 500
+    ja .close_client
+    mov r14, rax                ; content length
+
+    ; Find body
+    lea rdi, [rel read_buf]
+    call find_body
+    test rax, rax
+    jz .close_client
+    mov r13, rax                ; body pointer
+
+    ; Save bio
+    mov rsi, r13
+    mov rdx, r14
+    call save_bio
+    test rax, rax
+    js .close_client
+
+    ; Send success
+    pop r15                     ; client fd
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel http_200_bio_updated]
+    mov rdx, http_200_bio_updated_len
+    syscall
+
+    mov rax, SYS_CLOSE
+    mov rdi, r15
+    syscall
+    jmp .accept_loop
+
+.bio_403:
+    mov rax, SYS_WRITE
+    pop rdi
+    push rdi
+    lea rsi, [rel http_403_plain]
+    mov rdx, http_403_plain_len
+    syscall
+    jmp .close_client
 
 .route_admin:
     lea rdi, [rel read_buf]
@@ -1034,6 +1177,19 @@ render_blog:
     mov rcx, html_head_len
     call append_to_resp
 
+    ; Dynamic bio
+    lea rsi, [rel html_bio_open]
+    mov rcx, html_bio_open_len
+    call append_to_resp
+
+    call load_bio               ; rax = bio ptr, rcx = bio len
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel html_bio_close]
+    mov rcx, html_bio_close_len
+    call append_to_resp
+
     ; Form only if admin
     test ebx, ebx
     jz .skip_form
@@ -1137,6 +1293,212 @@ render_blog:
     pop r15
     pop r14
     pop r13
+    pop r12
+    pop rbx
+    ret
+
+;; ============================================================
+;; CHECK_GET_BIO_ROUTE - does request start with "GET /bio"?
+;; Returns: eax = 1 yes, 0 no
+;; ============================================================
+check_get_bio_route:
+    lea rdi, [rel read_buf]
+    lea rsi, [rel str_get_bio]
+    mov rcx, str_get_bio_len
+.cgbr_cmp:
+    test rcx, rcx
+    jz .cgbr_yes
+    cmpsb
+    jne .cgbr_no
+    dec rcx
+    jmp .cgbr_cmp
+.cgbr_yes:
+    mov eax, 1
+    ret
+.cgbr_no:
+    xor eax, eax
+    ret
+
+;; ============================================================
+;; CHECK_POST_BIO_ROUTE - does request start with "POST /bio"?
+;; Returns: eax = 1 yes, 0 no
+;; ============================================================
+check_post_bio_route:
+    lea rdi, [rel read_buf]
+    lea rsi, [rel str_post_bio]
+    mov rcx, str_post_bio_len
+.cpbr_cmp:
+    test rcx, rcx
+    jz .cpbr_yes
+    cmpsb
+    jne .cpbr_no
+    dec rcx
+    jmp .cpbr_cmp
+.cpbr_yes:
+    mov eax, 1
+    ret
+.cpbr_no:
+    xor eax, eax
+    ret
+
+;; ============================================================
+;; LOAD_BIO - Read bio from /data/bio.txt or use default
+;; Returns: rax = bio text pointer, rcx = bio length
+;; ============================================================
+load_bio:
+    push rbx
+    push r12
+
+    ; Open /data/bio.txt
+    mov rax, SYS_OPEN
+    lea rdi, [rel bio_path]
+    xor esi, esi                ; O_RDONLY
+    xor edx, edx
+    syscall
+    test rax, rax
+    js .lb_default              ; File doesn't exist
+
+    mov r12, rax                ; save fd
+
+    ; Read file
+    mov rax, SYS_READ
+    mov rdi, r12
+    lea rsi, [rel bio_buffer]
+    mov rdx, 500
+    syscall
+
+    test rax, rax
+    jle .lb_close_default       ; Read failed or empty
+
+    mov rbx, rax                ; save length
+    mov [rel bio_length], rax
+
+    ; Close file
+    mov rax, SYS_CLOSE
+    mov rdi, r12
+    syscall
+
+    ; Return bio buffer
+    lea rax, [rel bio_buffer]
+    mov rcx, rbx
+    pop r12
+    pop rbx
+    ret
+
+.lb_close_default:
+    mov rax, SYS_CLOSE
+    mov rdi, r12
+    syscall
+
+.lb_default:
+    lea rax, [rel default_bio]
+    mov rcx, default_bio_len
+    pop r12
+    pop rbx
+    ret
+
+;; ============================================================
+;; SAVE_BIO - Write bio to /data/bio.txt
+;; rsi = bio text pointer, rdx = bio length
+;; Returns: rax = 0 on success, -1 on error
+;; ============================================================
+save_bio:
+    push rbx
+    push r12
+    push r13
+
+    mov r12, rsi                ; bio text pointer
+    mov r13, rdx                ; bio length
+
+    ; Open/create file (O_WRONLY | O_CREAT | O_TRUNC = 1|64|512 = 577)
+    mov rax, SYS_OPEN
+    lea rdi, [rel bio_path]
+    mov esi, 577
+    mov rdx, 0644o
+    syscall
+    test rax, rax
+    js .sb_error
+
+    mov rbx, rax                ; save fd
+
+    ; Write bio
+    mov rax, SYS_WRITE
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    syscall
+
+    ; Close file
+    mov rax, SYS_CLOSE
+    mov rdi, rbx
+    syscall
+
+    xor eax, eax                ; success
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.sb_error:
+    mov rax, -1
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+;; ============================================================
+;; FIND_CONTENT_LENGTH - parse Content-Length header value
+;; rdi = request buffer
+;; Returns: rax = content length as integer, 0 if not found
+;; ============================================================
+find_content_length:
+    push rbx
+    push r12
+    mov r12, rdi
+
+.fcl_search:
+    cmp byte [r12], 0
+    je .fcl_notfound
+
+    mov rdi, r12
+    lea rsi, [rel str_content_length]
+    mov rcx, str_content_length_len
+.fcl_cmp:
+    test rcx, rcx
+    jz .fcl_found
+    cmpsb
+    jne .fcl_next
+    dec rcx
+    jmp .fcl_cmp
+
+.fcl_next:
+    inc r12
+    jmp .fcl_search
+
+.fcl_found:
+    ; rdi points past "Content-Length: " - parse decimal number
+    xor rax, rax
+    mov rbx, 10
+.fcl_parse:
+    movzx ecx, byte [rdi]
+    cmp cl, '0'
+    jb .fcl_done
+    cmp cl, '9'
+    ja .fcl_done
+    imul rax, rbx
+    sub cl, '0'
+    movzx ecx, cl
+    add rax, rcx
+    inc rdi
+    jmp .fcl_parse
+
+.fcl_done:
+    pop r12
+    pop rbx
+    ret
+
+.fcl_notfound:
+    xor eax, eax
     pop r12
     pop rbx
     ret
