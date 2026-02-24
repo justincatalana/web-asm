@@ -120,6 +120,26 @@ section .data
         db 'Content-Length: ', 0
     str_content_length_len equ $ - str_content_length - 1
 
+    ; Route strings for admin dashboard
+    str_post_update_bio:
+        db 'POST /update-bio', 0
+    str_post_update_bio_len equ $ - str_post_update_bio - 1
+
+    str_post_delete:
+        db 'POST /delete-post', 0
+    str_post_delete_len equ $ - str_post_delete - 1
+
+    str_post_edit:
+        db 'POST /edit-post', 0
+    str_post_edit_len equ $ - str_post_edit - 1
+
+    ; Form param strings
+    str_title_eq:  db 'title=', 0
+    str_body_eq:   db 'body=', 0
+    str_bio_eq:    db 'bio=', 0
+    str_id_eq:     db 'id=', 0
+    str_edit_eq:   db 'edit=', 0
+
     ; ---- HTML TEMPLATES ----
 
     html_head:
@@ -159,18 +179,19 @@ section .data
 
     ; Form: split around the token value so we can inject it
     html_form_pre:
-        db '<h2>> NEW POST</h2>'
-        db '<form method="POST" action="/post">'
+        db '<h2 id="form-heading">> NEW POST</h2>'
+        db '<form id="post-form" method="POST" action="/post">'
         db '<input type="hidden" name="token" value="'
     html_form_pre_len equ $ - html_form_pre
 
     html_form_post:
         db '">'
+        db '<input type="hidden" name="edit" id="edit-field" value="">'
         db '<label>TITLE:</label>'
-        db '<input type="text" name="title" maxlength="255" required>'
+        db '<input type="text" name="title" id="title-field" maxlength="255" required>'
         db '<label>BODY:</label>'
-        db '<textarea name="body" rows="8" maxlength="3800" required></textarea>'
-        db '<button type="submit">WRITE TO DISK</button>'
+        db '<textarea name="body" id="body-field" rows="8" maxlength="3800" required></textarea>'
+        db '<button type="submit" id="submit-btn">WRITE TO DISK</button>'
         db '</form>'
     html_form_post_len equ $ - html_form_post
 
@@ -204,6 +225,77 @@ section .data
     html_no_posts:
         db '<p style="color:#666;">[no posts yet. the void stares back.]</p>'
     html_no_posts_len equ $ - html_no_posts
+
+    ; Bio editor form (split around token value and bio text)
+    bio_form_pre:
+        db '<h2>> BIO</h2>'
+        db '<form method="POST" action="/update-bio">'
+        db '<input type="hidden" name="token" value="'
+    bio_form_pre_len equ $ - bio_form_pre
+
+    bio_form_mid:
+        db '"><label>BIO:</label>'
+        db '<textarea name="bio" rows="3" maxlength="500">'
+    bio_form_mid_len equ $ - bio_form_mid
+
+    bio_form_post:
+        db '</textarea>'
+        db '<button type="submit">UPDATE BIO</button>'
+        db '</form>'
+    bio_form_post_len equ $ - bio_form_post
+
+    ; Admin post open tag (with id attribute, split around index)
+    admin_post_open_pre:
+        db '<div class="post" id="post-'
+    admin_post_open_pre_len equ $ - admin_post_open_pre
+
+    admin_post_open_post:
+        db '"><h3>'
+    admin_post_open_post_len equ $ - admin_post_open_post
+
+    ; Admin action buttons (split around index and token)
+    admin_actions_pre:
+        db '<div style="margin-top:10px;">'
+        db '<button onclick="editPost('
+    admin_actions_pre_len equ $ - admin_actions_pre
+
+    admin_actions_mid1:
+        db ')">EDIT</button> '
+        db '<form method="POST" action="/delete-post" style="display:inline;">'
+        db '<input type="hidden" name="token" value="'
+    admin_actions_mid1_len equ $ - admin_actions_mid1
+
+    admin_actions_mid2:
+        db '"><input type="hidden" name="id" value="'
+    admin_actions_mid2_len equ $ - admin_actions_mid2
+
+    admin_actions_post:
+        db '">'
+        db '<button type="submit" onclick="return confirm('
+        db "'"
+        db 'Delete this post?'
+        db "'"
+        db ')">DELETE</button>'
+        db '</form></div></div></div>'
+    admin_actions_post_len equ $ - admin_actions_post
+
+    ; Admin JavaScript for edit functionality
+    admin_script:
+        db '<script>'
+        db 'function editPost(i){'
+        db "var p=document.getElementById('post-'+i);"
+        db "var t=p.querySelector('h3').textContent;"
+        db "var b=p.querySelector('.body').textContent;"
+        db "document.getElementById('title-field').value=t;"
+        db "document.getElementById('body-field').value=b;"
+        db "document.getElementById('edit-field').value=i;"
+        db "document.getElementById('form-heading').textContent='> EDIT POST #'+i;"
+        db "document.getElementById('post-form').action='/edit-post';"
+        db "document.getElementById('submit-btn').textContent='UPDATE POST';"
+        db 'window.scrollTo(0,0);'
+        db '}'
+        db '</script>'
+    admin_script_len equ $ - admin_script
 
     ; ---- HTTP RESPONSES ----
 
@@ -316,6 +408,7 @@ section .bss
     envp_save       resq 1
     bio_buffer      resb 512
     bio_length      resq 1
+    dec_bio         resb 512
 
 section .text
     global _start
@@ -443,10 +536,26 @@ _start:
     jmp .accept_loop
 
 .check_post_routes:
-    ; Check POST /bio
+    ; Check POST /bio (API)
     call check_post_bio_route
     test eax, eax
     jnz .handle_post_bio
+
+    ; Check POST /update-bio (form)
+    call check_post_update_bio_route
+    test eax, eax
+    jnz .handle_post_update_bio
+
+    ; Check POST /delete-post
+    call check_post_delete_route
+    test eax, eax
+    jnz .handle_post_delete
+
+    ; Check POST /edit-post
+    call check_post_edit_route
+    test eax, eax
+    jnz .handle_post_edit
+
     jmp .route_post
 
 .handle_post_bio:
@@ -488,6 +597,253 @@ _start:
     mov rdi, r15
     lea rsi, [rel http_200_bio_updated]
     mov rdx, http_200_bio_updated_len
+    syscall
+
+    mov rax, SYS_CLOSE
+    mov rdi, r15
+    syscall
+    jmp .accept_loop
+
+.handle_post_update_bio:
+    ; Require auth
+    cmp byte [rel auth_enabled], 1
+    jne .send_401
+
+    lea rdi, [rel read_buf]
+    call check_post_auth
+    test eax, eax
+    jz .send_401
+
+    ; Find body
+    lea rdi, [rel read_buf]
+    call find_body
+    test rax, rax
+    jz .close_client
+    mov r13, rax
+
+    ; Parse bio=
+    mov rdi, r13
+    lea rsi, [rel str_bio_eq]
+    call find_param_in_str
+    test rax, rax
+    jz .close_client
+
+    ; URL decode bio
+    mov rsi, rax
+    mov rdx, rcx
+    lea rdi, [rel dec_bio]
+    mov rcx, 500
+    call url_decode
+
+    ; Save bio
+    lea rsi, [rel dec_bio]
+    xor rdx, rdx
+.hub_len:
+    cmp byte [rsi + rdx], 0
+    je .hub_save
+    inc rdx
+    cmp rdx, 500
+    jb .hub_len
+.hub_save:
+    call save_bio
+
+    ; Send 302 redirect
+    pop r15
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel http_302]
+    mov rdx, http_302_len
+    syscall
+
+    mov rax, SYS_CLOSE
+    mov rdi, r15
+    syscall
+    jmp .accept_loop
+
+.handle_post_delete:
+    ; Require auth
+    cmp byte [rel auth_enabled], 1
+    jne .send_401
+
+    lea rdi, [rel read_buf]
+    call check_post_auth
+    test eax, eax
+    jz .send_401
+
+    ; Find body
+    lea rdi, [rel read_buf]
+    call find_body
+    test rax, rax
+    jz .close_client
+    mov r13, rax
+
+    ; Parse id=
+    mov rdi, r13
+    lea rsi, [rel str_id_eq]
+    call find_param_in_str
+    test rax, rax
+    jz .close_client
+
+    ; Convert id string to integer
+    mov rdi, rax
+    call str_to_uint
+    mov r14, rax            ; save id
+
+    ; Validate: 0 <= id < post_count
+    cmp r14, [rel post_count]
+    jae .close_client
+
+    ; Calculate file offset for title: DATA_START + id*RECORD_SIZE + TITLE_OFF
+    mov rax, r14
+    imul rax, RECORD_SIZE
+    add rax, DATA_START
+    add rax, TITLE_OFF
+
+    ; Seek to title position
+    mov rsi, rax
+    mov rax, SYS_LSEEK
+    mov rdi, [rel db_fd]
+    xor edx, edx
+    syscall
+
+    ; Zero out 256 bytes (title area) using record_buf as temp
+    lea rdi, [rel record_buf]
+    xor al, al
+    mov rcx, 256
+    rep stosb
+
+    mov rax, SYS_WRITE
+    mov rdi, [rel db_fd]
+    lea rsi, [rel record_buf]
+    mov rdx, 256
+    syscall
+
+    ; Send 302 redirect
+    pop r15
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel http_302]
+    mov rdx, http_302_len
+    syscall
+
+    mov rax, SYS_CLOSE
+    mov rdi, r15
+    syscall
+    jmp .accept_loop
+
+.handle_post_edit:
+    ; Require auth
+    cmp byte [rel auth_enabled], 1
+    jne .send_401
+
+    lea rdi, [rel read_buf]
+    call check_post_auth
+    test eax, eax
+    jz .send_401
+
+    ; Find body
+    lea rdi, [rel read_buf]
+    call find_body
+    test rax, rax
+    jz .close_client
+    mov r13, rax
+
+    ; Parse edit= (index)
+    mov rdi, r13
+    lea rsi, [rel str_edit_eq]
+    call find_param_in_str
+    test rax, rax
+    jz .close_client
+
+    mov rdi, rax
+    call str_to_uint
+    mov r14, rax            ; save index
+
+    ; Validate
+    cmp r14, [rel post_count]
+    jae .close_client
+
+    ; Parse title=
+    mov rdi, r13
+    lea rsi, [rel str_title_eq]
+    call find_param_in_str
+    test rax, rax
+    jz .close_client
+
+    mov rsi, rax
+    mov rdx, rcx
+    lea rdi, [rel dec_title]
+    mov rcx, TITLE_MAX
+    call url_decode
+
+    ; Parse body=
+    mov rdi, r13
+    lea rsi, [rel str_body_eq]
+    call find_param_in_str
+    test rax, rax
+    jz .close_client
+
+    mov rsi, rax
+    mov rdx, rcx
+    lea rdi, [rel dec_body]
+    mov rcx, BODY_MAX
+    call url_decode
+
+    ; Read existing record to preserve timestamp + next ptr
+    mov rax, r14
+    imul rax, RECORD_SIZE
+    add rax, DATA_START
+    mov r15, rax                ; save file offset in r15
+
+    mov rax, SYS_LSEEK
+    mov rdi, [rel db_fd]
+    mov rsi, r15
+    xor edx, edx
+    syscall
+
+    mov rax, SYS_READ
+    mov rdi, [rel db_fd]
+    lea rsi, [rel record_buf]
+    mov rdx, RECORD_SIZE
+    syscall
+
+    ; Zero title and body areas (keep next ptr bytes 0-7 and timestamp bytes 8-15)
+    lea rdi, [rel record_buf + TITLE_OFF]
+    xor al, al
+    mov rcx, RECORD_SIZE - TITLE_OFF
+    rep stosb
+
+    ; Copy new title
+    lea rdi, [rel record_buf + TITLE_OFF]
+    lea rsi, [rel dec_title]
+    mov rcx, TITLE_MAX
+    call copy_str
+
+    ; Copy new body
+    lea rdi, [rel record_buf + BODY_OFF]
+    lea rsi, [rel dec_body]
+    mov rcx, BODY_MAX
+    call copy_str
+
+    ; Write record back
+    mov rax, SYS_LSEEK
+    mov rdi, [rel db_fd]
+    mov rsi, r15                ; file offset from r15
+    xor edx, edx
+    syscall
+
+    mov rax, SYS_WRITE
+    mov rdi, [rel db_fd]
+    lea rsi, [rel record_buf]
+    mov rdx, RECORD_SIZE
+    syscall
+
+    ; Send 302 redirect
+    pop r15
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel http_302]
+    mov rdx, http_302_len
     syscall
 
     mov rax, SYS_CLOSE
@@ -1010,7 +1366,7 @@ handle_post_request:
 
     ; Parse title=
     mov rdi, r12
-    lea rsi, [rel .str_title]
+    lea rsi, [rel str_title_eq]
     call find_param_in_str
     test rax, rax
     jz .post_done
@@ -1023,7 +1379,7 @@ handle_post_request:
 
     ; Parse body=
     mov rdi, r12
-    lea rsi, [rel .str_body]
+    lea rsi, [rel str_body_eq]
     call find_param_in_str
     test rax, rax
     jz .post_done
@@ -1155,8 +1511,7 @@ handle_post_request:
     pop rbx
     ret
 
-.str_title: db 'title=', 0
-.str_body:  db 'body=', 0
+; (title=/body= strings moved to data section as str_title_eq/str_body_eq)
 
 ;; ============================================================
 ;; RENDER BLOG
@@ -1207,6 +1562,27 @@ render_blog:
     mov rcx, html_form_post_len
     call append_to_resp
 
+    ; Bio editor form (admin only)
+    lea rsi, [rel bio_form_pre]
+    mov rcx, bio_form_pre_len
+    call append_to_resp
+
+    lea rsi, [rel auth_token]
+    mov rcx, [rel auth_token_len]
+    call append_to_resp
+
+    lea rsi, [rel bio_form_mid]
+    mov rcx, bio_form_mid_len
+    call append_to_resp
+
+    call load_bio
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel bio_form_post]
+    mov rcx, bio_form_post_len
+    call append_to_resp
+
 .skip_form:
     mov r13, [rel post_count]
     test r13, r13
@@ -1239,10 +1615,35 @@ render_blog:
     mov rdx, RECORD_SIZE
     syscall
 
+    ; Skip deleted posts (empty title)
+    cmp byte [rel record_buf + TITLE_OFF], 0
+    je .skip_post
+
+    ; Post open tag - admin gets id attribute
+    test ebx, ebx
+    jz .public_post_open
+
+    ; Admin: <div class="post" id="post-N"><h3>
+    lea rsi, [rel admin_post_open_pre]
+    mov rcx, admin_post_open_pre_len
+    call append_to_resp
+
+    mov rdi, r14
+    call uint_to_str
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel admin_post_open_post]
+    mov rcx, admin_post_open_post_len
+    call append_to_resp
+    jmp .post_title
+
+.public_post_open:
     lea rsi, [rel html_post_open]
     mov rcx, html_post_open_len
     call append_to_resp
 
+.post_title:
     lea rsi, [rel record_buf + TITLE_OFF]
     call strlen_safe
     call append_to_resp
@@ -1264,15 +1665,62 @@ render_blog:
     call strlen_safe
     call append_to_resp
 
+    ; Post close - admin gets edit/delete buttons
+    test ebx, ebx
+    jz .public_post_close
+
+    ; Admin actions: editPost(index) button + delete form
+    lea rsi, [rel admin_actions_pre]
+    mov rcx, admin_actions_pre_len
+    call append_to_resp
+
+    mov rdi, r14
+    call uint_to_str
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel admin_actions_mid1]
+    mov rcx, admin_actions_mid1_len
+    call append_to_resp
+
+    lea rsi, [rel auth_token]
+    mov rcx, [rel auth_token_len]
+    call append_to_resp
+
+    lea rsi, [rel admin_actions_mid2]
+    mov rcx, admin_actions_mid2_len
+    call append_to_resp
+
+    mov rdi, r14
+    call uint_to_str
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel admin_actions_post]
+    mov rcx, admin_actions_post_len
+    call append_to_resp
+    jmp .skip_post
+
+.public_post_close:
     lea rsi, [rel html_post_close]
     mov rcx, html_post_close_len
     call append_to_resp
 
+.skip_post:
     dec r14
     test r14, r14
     jns .render_loop
 
 .render_tail:
+    ; Admin: inject script before footer
+    test ebx, ebx
+    jz .no_admin_script
+
+    lea rsi, [rel admin_script]
+    mov rcx, admin_script_len
+    call append_to_resp
+
+.no_admin_script:
     lea rsi, [rel html_tail]
     mov rcx, html_tail_len
     call append_to_resp
@@ -1765,4 +2213,93 @@ copy_str:
     jmp .cs_loop
 .cs_done:
     mov byte [rdi], 0
+    ret
+
+;; ============================================================
+;; STR_TO_UINT - parse decimal string to integer
+;; rdi = null-terminated string pointer
+;; Returns: rax = integer value
+;; ============================================================
+str_to_uint:
+    xor eax, eax
+    mov r8, 10
+.stu_loop:
+    movzx ecx, byte [rdi]
+    cmp cl, '0'
+    jb .stu_done
+    cmp cl, '9'
+    ja .stu_done
+    imul rax, r8
+    sub cl, '0'
+    movzx ecx, cl
+    add rax, rcx
+    inc rdi
+    jmp .stu_loop
+.stu_done:
+    ret
+
+;; ============================================================
+;; CHECK_POST_UPDATE_BIO_ROUTE - "POST /update-bio"?
+;; Returns: eax = 1 yes, 0 no
+;; ============================================================
+check_post_update_bio_route:
+    lea rdi, [rel read_buf]
+    lea rsi, [rel str_post_update_bio]
+    mov rcx, str_post_update_bio_len
+.cpubr_cmp:
+    test rcx, rcx
+    jz .cpubr_yes
+    cmpsb
+    jne .cpubr_no
+    dec rcx
+    jmp .cpubr_cmp
+.cpubr_yes:
+    mov eax, 1
+    ret
+.cpubr_no:
+    xor eax, eax
+    ret
+
+;; ============================================================
+;; CHECK_POST_DELETE_ROUTE - "POST /delete-post"?
+;; Returns: eax = 1 yes, 0 no
+;; ============================================================
+check_post_delete_route:
+    lea rdi, [rel read_buf]
+    lea rsi, [rel str_post_delete]
+    mov rcx, str_post_delete_len
+.cpdr_cmp:
+    test rcx, rcx
+    jz .cpdr_yes
+    cmpsb
+    jne .cpdr_no
+    dec rcx
+    jmp .cpdr_cmp
+.cpdr_yes:
+    mov eax, 1
+    ret
+.cpdr_no:
+    xor eax, eax
+    ret
+
+;; ============================================================
+;; CHECK_POST_EDIT_ROUTE - "POST /edit-post"?
+;; Returns: eax = 1 yes, 0 no
+;; ============================================================
+check_post_edit_route:
+    lea rdi, [rel read_buf]
+    lea rsi, [rel str_post_edit]
+    mov rcx, str_post_edit_len
+.cper_cmp:
+    test rcx, rcx
+    jz .cper_yes
+    cmpsb
+    jne .cper_no
+    dec rcx
+    jmp .cper_cmp
+.cper_yes:
+    mov eax, 1
+    ret
+.cper_no:
+    xor eax, eax
     ret
