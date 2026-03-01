@@ -68,6 +68,16 @@
 %define SYS_LISTEN      50
 %define SYS_SETSOCKOPT  54
 %define SYS_CLOCK_GETTIME 228
+%define SYS_RT_SIGACTION 13
+%define SYS_FORK         57
+%define SYS_EXIT         60
+%define SYS_FLOCK        73
+%define SIGCHLD          17
+%define LOCK_EX          2
+%define LOCK_UN          8
+%define SOL_SOCKET       1
+%define SO_RCVTIMEO      20
+%define SO_SNDTIMEO      21
 
 ; open flags
 %define O_RDONLY        0
@@ -303,12 +313,16 @@ section .data
         db 'HTTP/1.1 200 OK', 13, 10
         db 'Content-Type: text/html; charset=utf-8', 13, 10
         db 'Connection: close', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'X-Frame-Options: DENY', 13, 10
         db 'Content-Length: '
     http_200_len equ $ - http_200
 
     http_302:
         db 'HTTP/1.1 302 Found', 13, 10
         db 'Location: /', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'X-Frame-Options: DENY', 13, 10
         db 'Content-Length: 0', 13, 10
         db 13, 10
     http_302_len equ $ - http_302
@@ -317,6 +331,8 @@ section .data
         db 'HTTP/1.1 401 Unauthorized', 13, 10
         db 'Content-Type: text/html; charset=utf-8', 13, 10
         db 'Connection: close', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'X-Frame-Options: DENY', 13, 10
         db 'Content-Length: 120', 13, 10
         db 13, 10
         db '<html><body style="background:#0a0a0a;color:#ff4444;'
@@ -328,6 +344,8 @@ section .data
         db 'HTTP/1.1 403 Forbidden', 13, 10
         db 'Content-Type: text/html; charset=utf-8', 13, 10
         db 'Connection: close', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'X-Frame-Options: DENY', 13, 10
         db 'Content-Length: 117', 13, 10
         db 13, 10
         db '<html><body style="background:#0a0a0a;color:#ff4444;'
@@ -338,6 +356,8 @@ section .data
     http_503:
         db 'HTTP/1.1 503 Service Unavailable', 13, 10
         db 'Content-Type: text/plain', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'X-Frame-Options: DENY', 13, 10
         db 'Content-Length: 30', 13, 10
         db 13, 10
         db 'NO AUTH TOKEN CONFIGURED', 13, 10, 13, 10
@@ -347,6 +367,8 @@ section .data
         db 'HTTP/1.1 200 OK', 13, 10
         db 'Content-Type: text/plain; charset=utf-8', 13, 10
         db 'Connection: close', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'X-Frame-Options: DENY', 13, 10
         db 13, 10
     http_200_plain_len equ $ - http_200_plain
 
@@ -354,6 +376,8 @@ section .data
         db 'HTTP/1.1 200 OK', 13, 10
         db 'Content-Type: text/plain; charset=utf-8', 13, 10
         db 'Connection: close', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'X-Frame-Options: DENY', 13, 10
         db 'Content-Length: 11', 13, 10
         db 13, 10
         db 'Bio updated'
@@ -363,10 +387,21 @@ section .data
         db 'HTTP/1.1 403 Forbidden', 13, 10
         db 'Content-Type: text/plain; charset=utf-8', 13, 10
         db 'Connection: close', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'X-Frame-Options: DENY', 13, 10
         db 'Content-Length: 13', 13, 10
         db 13, 10
         db '403 Forbidden'
     http_403_plain_len equ $ - http_403_plain
+
+    http_413:
+        db 'HTTP/1.1 413 Payload Too Large', 13, 10
+        db 'Connection: close', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'X-Frame-Options: DENY', 13, 10
+        db 'Content-Length: 0', 13, 10
+        db 13, 10
+    http_413_len equ $ - http_413
 
     crlf: db 13, 10, 13, 10
     crlf_len equ $ - crlf
@@ -387,6 +422,28 @@ section .data
     auth_fail_msg:
         db '  [AUTH] WARNING: BLOG_TOKEN not set! Posting disabled.', 10
     auth_fail_msg_len equ $ - auth_fail_msg
+
+    ; Sigaction struct for ignoring SIGCHLD (auto-reap children)
+    sa_sigchld:
+        dq 1                    ; sa_handler = SIG_IGN
+        dq 0                    ; sa_flags
+        dq 0                    ; sa_restorer
+        dq 0                    ; sa_mask
+
+    ; Socket timeout: 5 seconds, 0 microseconds
+    timeout_val:
+        dq 5                    ; tv_sec
+        dq 0                    ; tv_usec
+
+    ; HTML entity strings for XSS escaping
+    ent_amp:  db '&amp;'
+    ent_amp_len equ 5
+    ent_lt:   db '&lt;'
+    ent_lt_len equ 4
+    ent_gt:   db '&gt;'
+    ent_gt_len equ 4
+    ent_quot: db '&quot;'
+    ent_quot_len equ 6
 
 section .bss
     server_fd       resq 1
@@ -409,6 +466,7 @@ section .bss
     bio_buffer      resb 512
     bio_length      resq 1
     dec_bio         resb 512
+    client_fd_val   resq 1
 
 section .text
     global _start
@@ -465,6 +523,14 @@ _start:
     mov rsi, 128
     syscall
 
+    ; Ignore SIGCHLD to auto-reap forked children (prevent zombies)
+    mov rax, SYS_RT_SIGACTION
+    mov rdi, SIGCHLD
+    lea rsi, [rel sa_sigchld]
+    xor edx, edx                ; NULL old action
+    mov r10, 8                  ; sizeof(sigset_t)
+    syscall
+
 ;; ============================================================
 ;; MAIN ACCEPT LOOP
 ;; ============================================================
@@ -479,7 +545,46 @@ _start:
     test rax, rax
     js .accept_loop
 
-    push rax                    ; client fd
+    mov [rel client_fd_val], rax
+
+    ; Fork: child handles request, parent loops
+    mov rax, SYS_FORK
+    syscall
+
+    test rax, rax
+    jz .child_process
+
+    ; Parent (rax > 0) or fork error (rax < 0): close client fd, loop
+    mov rax, SYS_CLOSE
+    mov rdi, [rel client_fd_val]
+    syscall
+    jmp .accept_loop
+
+.child_process:
+    ; Child: close server fd (not needed in child)
+    mov rax, SYS_CLOSE
+    mov rdi, [rel server_fd]
+    syscall
+
+    ; Set socket receive timeout (5 seconds)
+    mov rax, SYS_SETSOCKOPT
+    mov rdi, [rel client_fd_val]
+    mov rsi, SOL_SOCKET
+    mov rdx, SO_RCVTIMEO
+    lea r10, [rel timeout_val]
+    mov r8, 16
+    syscall
+
+    ; Set socket send timeout (5 seconds)
+    mov rax, SYS_SETSOCKOPT
+    mov rdi, [rel client_fd_val]
+    mov rsi, SOL_SOCKET
+    mov rdx, SO_SNDTIMEO
+    lea r10, [rel timeout_val]
+    mov r8, 16
+    syscall
+
+    push qword [rel client_fd_val]
 
     ; Read request
     mov rax, SYS_READ
@@ -533,7 +638,7 @@ _start:
     mov rax, SYS_CLOSE
     mov rdi, r15
     syscall
-    jmp .accept_loop
+    jmp .child_exit
 
 .check_post_routes:
     ; Check POST /bio (API)
@@ -584,10 +689,12 @@ _start:
     jz .close_client
     mov r13, rax                ; body pointer
 
-    ; Save bio
+    ; Lock database and save bio
+    call lock_db
     mov rsi, r13
     mov rdx, r14
     call save_bio
+    call unlock_db
     test rax, rax
     js .close_client
 
@@ -602,7 +709,7 @@ _start:
     mov rax, SYS_CLOSE
     mov rdi, r15
     syscall
-    jmp .accept_loop
+    jmp .child_exit
 
 .handle_post_update_bio:
     ; Require auth
@@ -645,7 +752,9 @@ _start:
     cmp rdx, 500
     jb .hub_len
 .hub_save:
+    call lock_db
     call save_bio
+    call unlock_db
 
     ; Send 302 redirect
     pop r15
@@ -658,7 +767,7 @@ _start:
     mov rax, SYS_CLOSE
     mov rdi, r15
     syscall
-    jmp .accept_loop
+    jmp .child_exit
 
 .handle_post_delete:
     ; Require auth
@@ -693,6 +802,9 @@ _start:
     cmp r14, [rel post_count]
     jae .close_client
 
+    ; Lock database for write
+    call lock_db
+
     ; Calculate file offset for title: DATA_START + id*RECORD_SIZE + TITLE_OFF
     mov rax, r14
     imul rax, RECORD_SIZE
@@ -718,6 +830,9 @@ _start:
     mov rdx, 256
     syscall
 
+    ; Unlock database
+    call unlock_db
+
     ; Send 302 redirect
     pop r15
     mov rax, SYS_WRITE
@@ -729,7 +844,7 @@ _start:
     mov rax, SYS_CLOSE
     mov rdi, r15
     syscall
-    jmp .accept_loop
+    jmp .child_exit
 
 .handle_post_edit:
     ; Require auth
@@ -789,6 +904,9 @@ _start:
     mov rcx, BODY_MAX
     call url_decode
 
+    ; Lock database for write
+    call lock_db
+
     ; Read existing record to preserve timestamp + next ptr
     mov rax, r14
     imul rax, RECORD_SIZE
@@ -838,6 +956,9 @@ _start:
     mov rdx, RECORD_SIZE
     syscall
 
+    ; Unlock database
+    call unlock_db
+
     ; Send 302 redirect
     pop r15
     mov rax, SYS_WRITE
@@ -849,7 +970,7 @@ _start:
     mov rax, SYS_CLOSE
     mov rdi, r15
     syscall
-    jmp .accept_loop
+    jmp .child_exit
 
 .bio_403:
     mov rax, SYS_WRITE
@@ -880,6 +1001,12 @@ _start:
     test eax, eax
     jz .send_401
 
+    ; POST body size validation
+    lea rdi, [rel read_buf]
+    call find_content_length
+    cmp rax, BUF_SIZE - 512
+    ja .send_413
+
     call handle_post_request
 
     mov rax, SYS_WRITE
@@ -887,6 +1014,15 @@ _start:
     push rdi
     lea rsi, [rel http_302]
     mov rdx, http_302_len
+    syscall
+    jmp .close_client
+
+.send_413:
+    mov rax, SYS_WRITE
+    pop rdi
+    push rdi
+    lea rsi, [rel http_413]
+    mov rdx, http_413_len
     syscall
     jmp .close_client
 
@@ -950,13 +1086,17 @@ _start:
     mov rax, SYS_CLOSE
     mov rdi, r15
     syscall
-    jmp .accept_loop
+    jmp .child_exit
 
 .close_client:
     mov rax, SYS_CLOSE
     pop rdi
     syscall
-    jmp .accept_loop
+
+.child_exit:
+    mov rax, SYS_EXIT
+    xor edi, edi
+    syscall
 
 ;; ============================================================
 ;; LOAD TOKEN FROM ENVIRONMENT
@@ -1358,6 +1498,10 @@ handle_post_request:
     push r14
     push r15
 
+    ; Enforce MAX_POSTS limit
+    cmp qword [rel post_count], MAX_POSTS
+    jae .post_done
+
     lea rdi, [rel read_buf]
     call find_body
     test rax, rax
@@ -1414,6 +1558,9 @@ handle_post_request:
     lea rsi, [rel dec_body]
     mov rcx, BODY_MAX
     call copy_str
+
+    ; Lock database for write
+    call lock_db
 
     ; Calculate file offset for new record
     mov rax, [rel post_count]
@@ -1503,6 +1650,9 @@ handle_post_request:
     mov rdx, 8
     syscall
 
+    ; Unlock database
+    call unlock_db
+
 .post_done:
     pop r15
     pop r14
@@ -1539,7 +1689,7 @@ render_blog:
 
     call load_bio               ; rax = bio ptr, rcx = bio len
     mov rsi, rax
-    call append_to_resp
+    call html_escape_append
 
     lea rsi, [rel html_bio_close]
     mov rcx, html_bio_close_len
@@ -1577,7 +1727,7 @@ render_blog:
 
     call load_bio
     mov rsi, rax
-    call append_to_resp
+    call html_escape_append
 
     lea rsi, [rel bio_form_post]
     mov rcx, bio_form_post_len
@@ -1646,7 +1796,7 @@ render_blog:
 .post_title:
     lea rsi, [rel record_buf + TITLE_OFF]
     call strlen_safe
-    call append_to_resp
+    call html_escape_append
 
     lea rsi, [rel html_title_close]
     mov rcx, html_title_close_len
@@ -1663,7 +1813,7 @@ render_blog:
 
     lea rsi, [rel record_buf + BODY_OFF]
     call strlen_safe
-    call append_to_resp
+    call html_escape_append
 
     ; Post close - admin gets edit/delete buttons
     test ebx, ebx
@@ -1952,6 +2102,23 @@ find_content_length:
     ret
 
 ;; ============================================================
+;; FILE LOCKING (serialize writes across forked children)
+;; ============================================================
+lock_db:
+    mov rax, SYS_FLOCK
+    mov rdi, [rel db_fd]
+    mov rsi, LOCK_EX
+    syscall
+    ret
+
+unlock_db:
+    mov rax, SYS_FLOCK
+    mov rdi, [rel db_fd]
+    mov rsi, LOCK_UN
+    syscall
+    ret
+
+;; ============================================================
 ;; UTILITIES
 ;; ============================================================
 
@@ -1964,6 +2131,89 @@ append_to_resp:
     rep movsb
     mov r12, rdi
 .skip_append:
+    ret
+
+;; ============================================================
+;; HTML_ESCAPE_APPEND - copy with HTML entity escaping
+;; rsi = source, rcx = source length
+;; r12 = dest pointer in resp_buf (updated)
+;; Escapes: & → &amp;  < → &lt;  > → &gt;  " → &quot;
+;; ============================================================
+html_escape_append:
+    push rbx
+    push r13
+    push r14
+    mov r13, rsi            ; source
+    mov r14, rcx            ; source length
+    xor ebx, ebx            ; source index
+
+.hea_loop:
+    cmp rbx, r14
+    jge .hea_done
+
+    ; Check resp_buf overflow
+    lea rax, [rel resp_buf]
+    add rax, RESP_SIZE - 256
+    cmp r12, rax
+    jae .hea_done
+
+    movzx eax, byte [r13 + rbx]
+
+    cmp al, '&'
+    je .hea_amp
+    cmp al, '<'
+    je .hea_lt
+    cmp al, '>'
+    je .hea_gt
+    cmp al, '"'
+    je .hea_quot
+
+    ; Normal byte - pass through
+    mov byte [r12], al
+    inc r12
+    inc rbx
+    jmp .hea_loop
+
+.hea_amp:
+    lea rsi, [rel ent_amp]
+    mov rcx, ent_amp_len
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+    inc rbx
+    jmp .hea_loop
+
+.hea_lt:
+    lea rsi, [rel ent_lt]
+    mov rcx, ent_lt_len
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+    inc rbx
+    jmp .hea_loop
+
+.hea_gt:
+    lea rsi, [rel ent_gt]
+    mov rcx, ent_gt_len
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+    inc rbx
+    jmp .hea_loop
+
+.hea_quot:
+    lea rsi, [rel ent_quot]
+    mov rcx, ent_quot_len
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+    inc rbx
+    jmp .hea_loop
+
+.hea_done:
+    pop r14
+    pop r13
+    pop rbx
     ret
 
 strlen_safe:
