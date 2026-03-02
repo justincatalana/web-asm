@@ -37,5 +37,5 @@ accessories:
     image: <your-dockerhub-username>/blog-backup
     host: <your-server-ip>
     volumes:
-      - /opt/blog/data:/data
-      - /opt/blog/backups:/backups
+      - /data:/data
+      - /backups:/backups
