@@ -16,6 +16,9 @@ if [ ! -d "$GIT_DIR/.git" ]; then
     echo "Initialized git repo for blog backups"
 fi
 
+# Fix ownership warning for mounted volumes
+git config --global --add safe.directory "$GIT_DIR"
+
 # Initial backup on startup
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 cp "$DATA_FILE" "$BACKUP_DIR/blog-${TIMESTAMP}.dat"
