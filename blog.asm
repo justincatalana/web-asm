@@ -482,6 +482,7 @@ section .bss
     envp_save       resq 1
     bio_buffer      resb 512
     bio_length      resq 1
+    visible_count   resq 1
     dec_bio         resb 512
     client_fd_val   resq 1
     blog_name       resb 128
@@ -1804,6 +1805,7 @@ render_blog:
     call append_to_resp
 
 .skip_form:
+    mov qword [rel visible_count], 0
     mov r13, [rel post_count]
     test r13, r13
     jnz .has_posts
@@ -1838,6 +1840,8 @@ render_blog:
     ; Skip deleted posts (empty title)
     cmp byte [rel record_buf + TITLE_OFF], 0
     je .skip_post
+
+    inc qword [rel visible_count]
 
     ; Post open tag - admin gets id attribute
     test ebx, ebx
@@ -1953,7 +1957,7 @@ render_blog:
     mov rcx, html_tail_post_len
     call append_to_resp
 
-    mov rdi, [rel post_count]
+    mov rdi, [rel visible_count]
     call uint_to_str
     mov rsi, rax
     call append_to_resp
