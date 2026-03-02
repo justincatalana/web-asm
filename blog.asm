@@ -224,8 +224,15 @@ section .data
     html_post_open_len equ $ - html_post_open
 
     html_title_close:
-        db '</h3><div class="ts">epoch: '
+        db '</h3><div class="ts">'
     html_title_close_len equ $ - html_title_close
+
+    str_at: db ' at '
+    str_at_len equ $ - str_at
+    str_am: db ' am'
+    str_am_len equ $ - str_am
+    str_pm: db ' pm'
+    str_pm_len equ $ - str_pm
 
     html_ts_close:
         db '</div><div class="body">'
@@ -245,9 +252,13 @@ section .data
         db 'records: '
     html_tail_post_len equ $ - html_tail_post
 
-    html_end:
+    html_end_singular:
+        db ' post on disk</div></body></html>'
+    html_end_singular_len equ $ - html_end_singular
+
+    html_end_plural:
         db ' posts on disk</div></body></html>'
-    html_end_len equ $ - html_end
+    html_end_plural_len equ $ - html_end_plural
 
     html_no_posts:
         db '<p style="color:#666;">[no posts yet. the void stares back.]</p>'
@@ -487,6 +498,7 @@ section .bss
     client_fd_val   resq 1
     blog_name       resb 128
     blog_name_len   resq 1
+    date_buf        resb 32
 
 section .text
     global _start
@@ -1877,8 +1889,7 @@ render_blog:
     call append_to_resp
 
     mov rdi, [rel record_buf + 8]
-    call uint_to_str
-    mov rsi, rax
+    call format_epoch
     call append_to_resp
 
     lea rsi, [rel html_ts_close]
@@ -1962,8 +1973,15 @@ render_blog:
     mov rsi, rax
     call append_to_resp
 
-    lea rsi, [rel html_end]
-    mov rcx, html_end_len
+    cmp qword [rel visible_count], 1
+    jne .plural_footer
+    lea rsi, [rel html_end_singular]
+    mov rcx, html_end_singular_len
+    jmp .append_footer
+.plural_footer:
+    lea rsi, [rel html_end_plural]
+    mov rcx, html_end_plural_len
+.append_footer:
     call append_to_resp
 
     lea rax, [rel resp_buf]
@@ -2351,6 +2369,313 @@ uint_to_str:
     lea rcx, [rel num_buf + 31]
     sub rcx, r8
     pop r12
+    pop rbx
+    ret
+
+;; ============================================================
+;; FORMAT_EPOCH - convert unix timestamp to "mm/dd/yy at h:mm am/pm"
+;; Input:  rdi = unix epoch seconds
+;; Output: rsi = pointer to formatted string, rcx = length
+;; Uses Howard Hinnant's civil_from_days algorithm
+;; ============================================================
+format_epoch:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r12, rdi                ; save epoch
+
+    ; --- extract time of day ---
+    mov rax, r12
+    xor edx, edx
+    mov rbx, 86400
+    div rbx                     ; rax = total_days, edx = remaining seconds
+    mov r13, rax                ; r13 = total_days (days since epoch)
+    mov r14d, edx               ; r14d = seconds in day
+
+    ; hours = seconds / 3600
+    mov eax, r14d
+    xor edx, edx
+    mov ebx, 3600
+    div ebx                     ; eax = hours, edx = remaining
+    mov r15d, eax               ; r15d = hours (0-23)
+    ; minutes = remaining / 60
+    mov eax, edx
+    xor edx, edx
+    mov ebx, 60
+    div ebx                     ; eax = minutes
+    mov ecx, eax                ; ecx = minutes (0-59), edx = seconds (unused)
+    push rcx                    ; save minutes on stack
+
+    ; --- civil_from_days (Hinnant algorithm) ---
+    ; z = total_days + 719468
+    mov rax, r13
+    add rax, 719468             ; z
+    mov r13, rax
+
+    ; era = (z >= 0 ? z : z - 146096) / 146097
+    mov rax, r13
+    test rax, rax
+    jns .era_pos
+    sub rax, 146096
+.era_pos:
+    xor edx, edx
+    mov rbx, 146097
+    ; signed division needed
+    cqo
+    idiv rbx                    ; rax = era
+    mov r14, rax                ; r14 = era
+
+    ; doe = z - era * 146097  (day of era, 0-146096)
+    mov rax, r14
+    imul rax, 146097
+    mov rbx, r13
+    sub rbx, rax
+    mov r13, rbx                ; r13 = doe
+
+    ; yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365
+    mov rax, r13
+    xor edx, edx
+    mov rbx, 1460
+    div rbx
+    mov rcx, rax                ; doe/1460
+
+    mov rax, r13
+    xor edx, edx
+    mov rbx, 36524
+    div rbx
+    sub rcx, rax                ; - doe/36524... wait, formula is:
+    ; yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365
+    ; Let me redo: result = doe - doe/1460 + doe/36524 - doe/146096
+    mov rax, r13                ; doe
+    push rax                    ; save doe
+
+    mov rax, r13
+    xor edx, edx
+    mov rbx, 1460
+    div rbx
+    mov rcx, rax                ; doe/1460
+
+    mov rax, r13
+    xor edx, edx
+    mov rbx, 36524
+    div rbx
+    mov r8, rax                 ; doe/36524
+
+    mov rax, r13
+    xor edx, edx
+    mov rbx, 146096
+    div rbx                     ; doe/146096
+    ; result = doe - doe/1460 + doe/36524 - doe/146096
+    pop rax                     ; rax = doe
+    sub rax, rcx               ; - doe/1460
+    add rax, r8                ; + doe/36524
+    sub rax, rdx               ; - doe/146096... rdx has remainder, not quotient!
+
+    ; redo doe/146096 properly
+    push rax
+    mov rax, r13
+    xor edx, edx
+    mov rbx, 146096
+    div rbx
+    mov r9, rax                 ; r9 = doe/146096
+    pop rax
+    add rax, rdx               ; undo the wrong sub (add back rdx)
+    sub rax, r9                ; subtract the correct quotient
+
+    xor edx, edx
+    mov rbx, 365
+    div rbx                     ; yoe
+    mov rbx, rax                ; rbx = yoe
+
+    ; y = yoe + era * 400
+    mov rax, r14                ; era
+    imul rax, 400
+    add rax, rbx
+    mov r14, rax                ; r14 = y (year, shifted - March-based)
+
+    ; doy = doe - (365*yoe + yoe/4 - yoe/100)
+    mov rax, rbx                ; yoe
+    imul rax, 365
+    mov rcx, rax                ; 365*yoe
+
+    mov rax, rbx                ; yoe
+    shr rax, 2                  ; yoe/4
+    add rcx, rax
+
+    mov rax, rbx                ; yoe
+    xor edx, edx
+    push rbx
+    mov rbx, 100
+    div rbx
+    pop rbx
+    sub rcx, rax               ; 365*yoe + yoe/4 - yoe/100
+
+    mov rax, r13                ; doe
+    sub rax, rcx               ; doy
+    mov r13, rax                ; r13 = doy
+
+    ; mp = (5*doy + 2) / 153
+    mov rax, r13
+    imul rax, 5
+    add rax, 2
+    xor edx, edx
+    mov rbx, 153
+    div rbx
+    mov r8, rax                 ; r8 = mp
+
+    ; d = doy - (153*mp + 2)/5 + 1
+    mov rax, r8                 ; mp
+    imul rax, 153
+    add rax, 2
+    xor edx, edx
+    mov rbx, 5
+    div rbx
+    mov rcx, r13                ; doy
+    sub rcx, rax
+    inc rcx                     ; rcx = day (1-31)
+    push rcx                    ; save day
+
+    ; m = mp < 10 ? mp + 3 : mp - 9
+    mov rax, r8
+    cmp rax, 10
+    jge .mp_ge10
+    add rax, 3
+    jmp .month_done
+.mp_ge10:
+    sub rax, 9
+.month_done:
+    mov r8, rax                 ; r8 = month (1-12)
+
+    ; y += (m <= 2)   -- adjust year if Jan or Feb
+    cmp r8, 2
+    jg .year_done
+    inc r14
+.year_done:
+    ; Now: r14 = year, r8 = month (1-12), [rsp] = day, [rsp+8] = minutes, r15d = hours
+
+    ; --- format into date_buf ---
+    lea rdi, [rel date_buf]
+
+    ; month (2 digits with leading zero)
+    mov rax, r8
+    call .write_two_digits
+
+    mov byte [rdi], '/'
+    inc rdi
+
+    ; day (2 digits with leading zero)
+    pop rax                     ; day
+    call .write_two_digits
+
+    mov byte [rdi], '/'
+    inc rdi
+
+    ; year mod 100 (2 digits)
+    mov rax, r14
+    xor edx, edx
+    mov rbx, 100
+    div rbx
+    mov rax, rdx                ; year % 100
+    call .write_two_digits
+
+    ; " at "
+    mov byte [rdi], ' '
+    mov byte [rdi+1], 'a'
+    mov byte [rdi+2], 't'
+    mov byte [rdi+3], ' '
+    add rdi, 4
+
+    ; Convert 24h to 12h
+    pop rcx                     ; minutes
+    mov eax, r15d               ; hours (0-23)
+    xor r9d, r9d               ; r9d = 0 means AM, 1 means PM
+
+    cmp eax, 0
+    jne .not_midnight
+    mov eax, 12                 ; 0 -> 12 AM
+    jmp .hour_ready
+.not_midnight:
+    cmp eax, 12
+    jb .hour_ready              ; 1-11 -> AM, value unchanged
+    je .noon
+    sub eax, 12                 ; 13-23 -> 1-11 PM
+    mov r9d, 1
+    jmp .hour_ready
+.noon:
+    mov r9d, 1                  ; 12 -> 12 PM
+.hour_ready:
+    ; Write hour (no leading zero) - eax = 1-12
+    cmp eax, 10
+    jb .single_digit_hour
+    ; Two digit hour (10, 11, 12)
+    push rcx
+    push r9
+    xor edx, edx
+    mov ebx, 10
+    div ebx
+    add al, '0'
+    mov byte [rdi], al
+    inc rdi
+    add dl, '0'
+    mov byte [rdi], dl
+    inc rdi
+    pop r9
+    pop rcx
+    jmp .hour_written
+.single_digit_hour:
+    add al, '0'
+    mov byte [rdi], al
+    inc rdi
+.hour_written:
+    mov byte [rdi], ':'
+    inc rdi
+
+    ; minutes (2 digits with leading zero)
+    mov rax, rcx
+    call .write_two_digits
+
+    ; AM or PM
+    mov byte [rdi], ' '
+    inc rdi
+    test r9d, r9d
+    jnz .write_pm
+    mov byte [rdi], 'a'
+    mov byte [rdi+1], 'm'
+    jmp .ampm_done
+.write_pm:
+    mov byte [rdi], 'p'
+    mov byte [rdi+1], 'm'
+.ampm_done:
+    add rdi, 2
+
+    ; Calculate length
+    lea rsi, [rel date_buf]
+    mov rcx, rdi
+    sub rcx, rsi                ; rcx = length
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; Helper: write 2-digit number with leading zero
+; Input: rax = number (0-99), rdi = dest pointer
+; Output: rdi advanced by 2
+.write_two_digits:
+    push rbx
+    xor edx, edx
+    mov ebx, 10
+    div ebx                     ; al = tens, dl = ones
+    add al, '0'
+    mov byte [rdi], al
+    add dl, '0'
+    mov byte [rdi+1], dl
+    add rdi, 2
     pop rbx
     ret
 
