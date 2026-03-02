@@ -2373,10 +2373,11 @@ uint_to_str:
     ret
 
 ;; ============================================================
-;; FORMAT_EPOCH - convert unix timestamp to "mm/dd/yy at h:mm am/pm"
-;; Input:  rdi = unix epoch seconds
+;; FORMAT_EPOCH - convert unix timestamp to "m/d/yyyy at h:mm am/pm pst"
+;; Input:  rdi = unix epoch seconds (UTC)
 ;; Output: rsi = pointer to formatted string, rcx = length
 ;; Uses Howard Hinnant's civil_from_days algorithm
+;; Applies PST offset (UTC-8) before conversion
 ;; ============================================================
 format_epoch:
     push rbx
@@ -2385,7 +2386,9 @@ format_epoch:
     push r14
     push r15
 
-    mov r12, rdi                ; save epoch
+    ; Apply PST offset (UTC-8 = subtract 28800 seconds)
+    sub rdi, 28800
+    mov r12, rdi                ; save PST-adjusted epoch
 
     ; --- extract time of day ---
     mov rax, r12
@@ -2559,27 +2562,23 @@ format_epoch:
     ; --- format into date_buf ---
     lea rdi, [rel date_buf]
 
-    ; month (2 digits with leading zero)
+    ; month (no leading zero)
     mov rax, r8
-    call .write_two_digits
+    call .write_num_no_pad
 
     mov byte [rdi], '/'
     inc rdi
 
-    ; day (2 digits with leading zero)
+    ; day (no leading zero)
     pop rax                     ; day
-    call .write_two_digits
+    call .write_num_no_pad
 
     mov byte [rdi], '/'
     inc rdi
 
-    ; year mod 100 (2 digits)
+    ; full 4-digit year
     mov rax, r14
-    xor edx, edx
-    mov rbx, 100
-    div rbx
-    mov rax, rdx                ; year % 100
-    call .write_two_digits
+    call .write_four_digits
 
     ; " at "
     mov byte [rdi], ' '
@@ -2651,6 +2650,13 @@ format_epoch:
 .ampm_done:
     add rdi, 2
 
+    ; Append " pst"
+    mov byte [rdi], ' '
+    mov byte [rdi+1], 'p'
+    mov byte [rdi+2], 's'
+    mov byte [rdi+3], 't'
+    add rdi, 4
+
     ; Calculate length
     lea rsi, [rel date_buf]
     mov rcx, rdi
@@ -2676,6 +2682,66 @@ format_epoch:
     add dl, '0'
     mov byte [rdi+1], dl
     add rdi, 2
+    pop rbx
+    ret
+
+; Helper: write number without leading zero (1-31 range)
+; Input: rax = number, rdi = dest pointer
+; Output: rdi advanced by 1 or 2
+.write_num_no_pad:
+    push rbx
+    cmp rax, 10
+    jb .wnp_single
+    xor edx, edx
+    mov ebx, 10
+    div ebx
+    add al, '0'
+    mov byte [rdi], al
+    inc rdi
+    add dl, '0'
+    mov byte [rdi], dl
+    inc rdi
+    pop rbx
+    ret
+.wnp_single:
+    add al, '0'
+    mov byte [rdi], al
+    inc rdi
+    pop rbx
+    ret
+
+; Helper: write 4-digit year
+; Input: rax = year (e.g. 2026), rdi = dest pointer
+; Output: rdi advanced by 4
+.write_four_digits:
+    push rbx
+    ; thousands digit
+    xor edx, edx
+    mov ebx, 1000
+    div ebx
+    add al, '0'
+    mov byte [rdi], al
+    inc rdi
+    ; hundreds digit
+    mov eax, edx
+    xor edx, edx
+    mov ebx, 100
+    div ebx
+    add al, '0'
+    mov byte [rdi], al
+    inc rdi
+    ; tens digit
+    mov eax, edx
+    xor edx, edx
+    mov ebx, 10
+    div ebx
+    add al, '0'
+    mov byte [rdi], al
+    inc rdi
+    ; ones digit
+    add dl, '0'
+    mov byte [rdi], dl
+    inc rdi
     pop rbx
     ret
 
