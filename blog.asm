@@ -99,6 +99,12 @@ section .data
     env_token:   db "BLOG_TOKEN=", 0
     env_token_len equ $ - env_token - 1
 
+    env_blog_name:   db "BLOG_NAME=", 0
+    env_blog_name_len equ $ - env_blog_name - 1
+
+    default_blog_name: db "Assembly Blog", 0
+    default_blog_name_len equ 13
+
     sockaddr:
         dw 2                    ; AF_INET
         dw LISTEN_PORT
@@ -152,9 +158,13 @@ section .data
 
     ; ---- HTML TEMPLATES ----
 
-    html_head:
+    html_head_pre:
         db '<!DOCTYPE html><html><head><meta charset="utf-8">'
-        db '<title>Justin Catalana</title>'
+        db '<title>'
+    html_head_pre_len equ $ - html_head_pre
+
+    html_head_mid:
+        db '</title>'
         db '<style>'
         db 'body{background:#f8f8f8;color:#333;font-family:monospace;'
         db 'max-width:700px;margin:40px auto;padding:0 20px;}'
@@ -176,8 +186,12 @@ section .data
         db '.foot{color:#888;margin-top:40px;border-top:1px solid #eee;'
         db 'padding-top:10px;font-size:0.8em;}'
         db '</style></head><body>'
-        db '<div class="hdr"><h1>Justin Catalana</h1>'
-    html_head_len equ $ - html_head
+        db '<div class="hdr"><h1>'
+    html_head_mid_len equ $ - html_head_mid
+
+    html_head_post:
+        db '</h1>'
+    html_head_post_len equ $ - html_head_post
 
     html_bio_open:
         db '<p style="color:#777;">'
@@ -221,12 +235,15 @@ section .data
         db '</div></div>'
     html_post_close_len equ $ - html_post_close
 
-    html_tail:
-        db '<div class="foot">Justin Catalana // '
-        db 'served by x86-64 assembly // '
+    html_tail_pre:
+        db '<div class="foot">'
+    html_tail_pre_len equ $ - html_tail_pre
+
+    html_tail_post:
+        db ' // served by x86-64 assembly // '
         db '<a href="https://github.com/justincatalana/web-asm" style="color:#66b3ff;">source</a> // '
         db 'records: '
-    html_tail_len equ $ - html_tail
+    html_tail_post_len equ $ - html_tail_post
 
     html_end:
         db ' posts on disk</div></body></html>'
@@ -407,7 +424,7 @@ section .data
     crlf_len equ $ - crlf
 
     startup_msg:
-        db 10, '  === Justin Catalana Blog Engine ===', 10
+        db 10, '  === Assembly Blog Engine ===', 10
         db '  Pure x86-64 assembly', 10
         db '  Database: blog.dat (binary flat file + hash index)', 10
         db '  Listening on http://localhost:8080', 10
@@ -467,6 +484,8 @@ section .bss
     bio_length      resq 1
     dec_bio         resb 512
     client_fd_val   resq 1
+    blog_name       resb 128
+    blog_name_len   resq 1
 
 section .text
     global _start
@@ -489,6 +508,7 @@ _start:
     syscall
 
     call load_token
+    call load_blog_name
     call db_init
 
     ; Create socket
@@ -1146,6 +1166,40 @@ load_token:
     ret
 
 ;; ============================================================
+;; LOAD BLOG NAME FROM ENVIRONMENT
+;; ============================================================
+load_blog_name:
+    push rbx
+    push r12
+
+    lea rdi, [rel env_blog_name]
+    mov rsi, env_blog_name_len
+    call find_env_var
+    test rax, rax
+    jz .use_default_name
+
+    ; Copy env value to blog_name buffer
+    mov rsi, rax
+    lea rdi, [rel blog_name]
+    mov [rel blog_name_len], rcx
+    rep movsb
+    mov byte [rdi], 0
+    jmp .name_done
+
+.use_default_name:
+    lea rsi, [rel default_blog_name]
+    lea rdi, [rel blog_name]
+    mov rcx, default_blog_name_len
+    mov [rel blog_name_len], rcx
+    rep movsb
+    mov byte [rdi], 0
+
+.name_done:
+    pop r12
+    pop rbx
+    ret
+
+;; ============================================================
 ;; FIND_ENV_VAR - search envp for a prefix
 ;; rdi = prefix, rsi = prefix length
 ;; Returns: rax = ptr to value, rcx = value length, or rax=0
@@ -1678,8 +1732,24 @@ render_blog:
     mov ebx, edi
     lea r12, [rel resp_buf]
 
-    lea rsi, [rel html_head]
-    mov rcx, html_head_len
+    lea rsi, [rel html_head_pre]
+    mov rcx, html_head_pre_len
+    call append_to_resp
+
+    lea rsi, [rel blog_name]
+    mov rcx, [rel blog_name_len]
+    call append_to_resp
+
+    lea rsi, [rel html_head_mid]
+    mov rcx, html_head_mid_len
+    call append_to_resp
+
+    lea rsi, [rel blog_name]
+    mov rcx, [rel blog_name_len]
+    call append_to_resp
+
+    lea rsi, [rel html_head_post]
+    mov rcx, html_head_post_len
     call append_to_resp
 
     ; Dynamic bio
@@ -1871,8 +1941,16 @@ render_blog:
     call append_to_resp
 
 .no_admin_script:
-    lea rsi, [rel html_tail]
-    mov rcx, html_tail_len
+    lea rsi, [rel html_tail_pre]
+    mov rcx, html_tail_pre_len
+    call append_to_resp
+
+    lea rsi, [rel blog_name]
+    mov rcx, [rel blog_name_len]
+    call append_to_resp
+
+    lea rsi, [rel html_tail_post]
+    mov rcx, html_tail_post_len
     call append_to_resp
 
     mov rdi, [rel post_count]

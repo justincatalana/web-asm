@@ -1,83 +1,77 @@
 # web-asm
 
-A blogging platform written in pure x86-64 assembly. No libc, no libraries, just syscalls.
+A blog engine written in pure x86-64 Linux assembly. No libc, no libraries, only syscalls.
 
 ## Features
 
 - **HTTP server** — Socket creation, request parsing, response generation
 - **Flat-file database** — Fixed-size records with hash-indexed storage
+- **Admin dashboard** — Create, edit, delete posts and update bio from the browser
 - **Bearer token auth** — Constant-time comparison, no brute-force surface
-- **TLS-ready** — Designed to run behind reverse proxy (Caddy/nginx)
-- **Tiny footprint** — 18KB compiled binary, 84KB memory usage
+- **Fork-per-request** — Process isolation with XSS escaping and security headers
+- **Configurable name** — Blog name set via `BLOG_NAME` env var
+- **Tiny footprint** — ~18KB compiled binary
 
-## Build
+## Local Development (macOS)
 
-```bash
-nasm -f elf64 blog.asm -o blog.o
-ld blog.o -o blog
-```
-
-## Run
+Native build requires Linux x86-64. On macOS, use Docker Desktop:
 
 ```bash
-BLOG_TOKEN=your-secret-token-here ./blog
+docker build --platform linux/amd64 -t blog-dev .
+docker run --rm --platform linux/amd64 -p 8080:8080 \
+  -e BLOG_TOKEN=dev -e BLOG_NAME="My Blog" \
+  -v $(pwd)/data:/data blog-dev
 ```
 
-Then visit `http://localhost:8080`
+- Blog: http://localhost:8080
+- Admin: http://localhost:8080/admin?token=dev
 
-Admin page: `http://localhost:8080/admin?token=your-secret-token-here`
-
-## Production Deployment
-
-Run behind a reverse proxy for HTTPS:
+## Native Build (Linux only)
 
 ```bash
-# Using Caddy
-caddy reverse-proxy --from yourdomain.com --to localhost:8080
+nasm -f elf64 blog.asm -o blog.o && ld blog.o -o blog
+BLOG_TOKEN=secret BLOG_NAME="My Blog" ./blog
 ```
 
-Or create a systemd service:
+## Environment Variables
 
-```ini
-[Unit]
-Description=Assembly Blog
-After=network.target
+| Variable     | Required | Description                              |
+|--------------|----------|------------------------------------------|
+| `BLOG_TOKEN` | Yes      | Auth token for admin/posting             |
+| `BLOG_NAME`  | No       | Blog name in title/header (default: "Assembly Blog") |
 
-[Service]
-Type=simple
-WorkingDirectory=/opt/blog
-Environment="BLOG_TOKEN=your-token-here"
-ExecStart=/opt/blog/blog
-Restart=always
+## Routes
 
-[Install]
-WantedBy=multi-user.target
+| Method | Path           | Auth   | Description              |
+|--------|----------------|--------|--------------------------|
+| GET    | /              | No     | Public blog              |
+| GET    | /admin?token=  | Token  | Admin dashboard          |
+| GET    | /bio           | No     | Plain text bio           |
+| POST   | /post          | Bearer | Create post              |
+| POST   | /edit-post     | Form   | Edit existing post       |
+| POST   | /delete-post   | Form   | Delete post              |
+| POST   | /bio           | Bearer | Update bio (API)         |
+| POST   | /update-bio    | Form   | Update bio (form)        |
+
+## Deployment (Kamal)
+
+Copy the example config files and fill in your values:
+
+```bash
+cp config/deploy.yml.example config/deploy.yml
+cp .kamal/secrets.example .kamal/secrets
+# Edit both files with your server IP, Docker Hub username, tokens
+kamal setup
 ```
 
 ## Database Format
 
-`blog.dat` structure:
+`/data/blog.dat` structure:
 - **Header** (8 bytes): Post count
-- **Hash index** (2,048 bytes): 256 buckets × 8-byte offsets
-- **Records** (4,096 bytes each):
-  - Next pointer (8 bytes)
-  - Timestamp (8 bytes)
-  - Title (256 bytes)
-  - Body (3,824 bytes)
+- **Hash index** (2,048 bytes): 256 buckets x 8-byte offsets
+- **Records** (4,096 bytes each): next pointer + timestamp + title + body
 
-## API
-
-**Read (public):**
-```bash
-curl http://localhost:8080
-```
-
-**Post (authenticated):**
-```bash
-curl -H "Authorization: Bearer <token>" \
-  -X POST -d "title=Hello&body=World" \
-  http://localhost:8080/post
-```
+Bio stored separately in `/data/bio.txt`.
 
 ## License
 

@@ -1,0 +1,6 @@
+blog.o
+blog
+data/
+.kamal/secrets
+config/deploy.yml
+.DS_Store
