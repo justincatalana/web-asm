@@ -24,12 +24,10 @@ volumes:
 proxy:
   ssl: true
   host: <your-domain.com>
-
-healthcheck:
-  path: /
-  port: 8080
-  max_attempts: 10
-  interval: 3
+  app_port: 8080
+  healthcheck:
+    path: /
+    interval: 3
 
 ssh:
   user: root
