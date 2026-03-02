@@ -1,6 +1,7 @@
 blog.o
 blog
 data/
+backups/
 .kamal/secrets
 config/deploy.yml
 .DS_Store
