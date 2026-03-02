@@ -1,0 +1,5 @@
+FROM alpine:3.19
+RUN apk add --no-cache inotify-tools git bash
+COPY backup-watcher.sh /backup-watcher.sh
+RUN chmod +x /backup-watcher.sh
+ENTRYPOINT ["/backup-watcher.sh"]

@@ -1,0 +1,43 @@
+service: blog
+image: <your-dockerhub-username>/blog
+
+servers:
+  web:
+    - <your-server-ip>
+
+registry:
+  username: <your-dockerhub-username>
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  arch: amd64
+
+env:
+  secret:
+    - BLOG_TOKEN
+    - BLOG_NAME
+
+volumes:
+  - /data:/data
+
+proxy:
+  ssl: true
+  host: <your-domain.com>
+
+healthcheck:
+  path: /
+  port: 8080
+  max_attempts: 10
+  interval: 3
+
+ssh:
+  user: root
+
+accessories:
+  backup:
+    image: <your-dockerhub-username>/blog-backup
+    host: <your-server-ip>
+    volumes:
+      - /opt/blog/data:/data
+      - /opt/blog/backups:/backups
