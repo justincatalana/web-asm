@@ -188,7 +188,22 @@ section .data
         db '.post h3{color:#2a7fc1;margin:0 0 5px 0;}'
         db '.post .ts{color:#888;font-size:0.8em;}'
         db '.post .body{margin-top:10px;white-space:pre-wrap;color:#555;}'
-        db '.post .body video{display:block;}'
+        db '.vid{position:relative;max-width:100%;margin:10px 0;cursor:pointer;}'
+        db '.vid video{display:block;max-width:100%;border-radius:4px;}'
+        db '.vid::before{content:'
+        db "'"
+        db "'"
+        db ';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);'
+        db 'width:60px;height:60px;background:rgba(0,0,0,0.55);border-radius:50%;'
+        db 'z-index:1;pointer-events:none;}'
+        db '.vid::after{content:'
+        db "'"
+        db "'"
+        db ';position:absolute;top:50%;left:50%;'
+        db 'transform:translate(-50%,-50%) translateX(3px);'
+        db 'border-left:22px solid #fff;border-top:13px solid transparent;'
+        db 'border-bottom:13px solid transparent;z-index:2;pointer-events:none;}'
+        db '.vid.p::before,.vid.p::after{display:none;}'
         db 'form{background:#fff;border:1px solid #ddd;padding:20px;margin:20px 0;}'
         db 'input,textarea{width:100%;background:#fff;color:#333;'
         db 'border:1px solid #ccc;padding:8px;margin:5px 0 15px 0;'
@@ -476,13 +491,16 @@ section .data
 
     ; Video embed tag (split around filename)
     video_tag_open:
-        db '<video src="/video/'
+        db '<div class="vid"><video onplay="this.parentNode.classList.add('
+        db "'"
+        db 'p'
+        db "'"
+        db ')" src="/video/'
     video_tag_open_len equ $ - video_tag_open
 
     video_tag_close:
         db '" controls playsinline preload="metadata"'
-        db ' style="max-width:100%;margin:10px 0;border-radius:4px;"'
-        db '></video>'
+        db '></video></div>'
     video_tag_close_len equ $ - video_tag_close
 
     ; Marker for video embed in post body
