@@ -75,6 +75,8 @@
 %define SIGCHLD          17
 %define LOCK_EX          2
 %define LOCK_UN          8
+%define SEEK_SET         0
+%define SEEK_END         2
 %define SOL_SOCKET       1
 %define SO_RCVTIMEO      20
 %define SO_SNDTIMEO      21
@@ -89,6 +91,8 @@
 section .data
     db_path:     db "/data/blog.dat", 0
     bio_path:    db "/data/bio.txt", 0
+    video_dir:   db "/data/videos/", 0
+    video_dir_len equ $ - video_dir - 1
 
     default_bio:
         db 'Served by hand-crafted x86-64 assembly. '
@@ -127,6 +131,10 @@ section .data
     str_get_bio:
         db 'GET /bio', 0
     str_get_bio_len equ $ - str_get_bio - 1
+
+    str_get_video:
+        db 'GET /video/', 0
+    str_get_video_len equ $ - str_get_video - 1
 
     str_post_bio:
         db 'POST /bio', 0
@@ -175,6 +183,7 @@ section .data
         db '.post h3{color:#2a7fc1;margin:0 0 5px 0;}'
         db '.post .ts{color:#888;font-size:0.8em;}'
         db '.post .body{margin-top:10px;white-space:pre-wrap;color:#555;}'
+        db '.post .body video{display:block;}'
         db 'form{background:#fff;border:1px solid #ddd;padding:20px;margin:20px 0;}'
         db 'input,textarea{width:100%;background:#fff;color:#333;'
         db 'border:1px solid #ccc;padding:8px;margin:5px 0 15px 0;'
@@ -431,6 +440,41 @@ section .data
         db 13, 10
     http_413_len equ $ - http_413
 
+    http_200_video_pre:
+        db 'HTTP/1.1 200 OK', 13, 10
+        db 'Content-Type: video/mp4', 13, 10
+        db 'Connection: close', 13, 10
+        db 'Accept-Ranges: none', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'Cache-Control: public, max-age=86400', 13, 10
+        db 'Content-Length: '
+    http_200_video_pre_len equ $ - http_200_video_pre
+
+    http_404:
+        db 'HTTP/1.1 404 Not Found', 13, 10
+        db 'Content-Type: text/plain', 13, 10
+        db 'Connection: close', 13, 10
+        db 'Content-Length: 9', 13, 10
+        db 13, 10
+        db 'Not Found'
+    http_404_len equ $ - http_404
+
+    ; Video embed tag (split around filename)
+    video_tag_open:
+        db '<video src="/video/'
+    video_tag_open_len equ $ - video_tag_open
+
+    video_tag_close:
+        db '" controls playsinline preload="metadata"'
+        db ' style="max-width:100%;margin:10px 0;border-radius:4px;"'
+        db '></video>'
+    video_tag_close_len equ $ - video_tag_close
+
+    ; Marker for video embed in post body
+    video_marker:
+        db '[video:'
+    video_marker_len equ 7
+
     crlf: db 13, 10, 13, 10
     crlf_len equ $ - crlf
 
@@ -498,6 +542,7 @@ section .bss
     client_fd_val   resq 1
     blog_name       resb 128
     blog_name_len   resq 1
+    video_path      resb 512
     date_buf        resb 32
 
 section .text
@@ -641,6 +686,11 @@ _start:
     test eax, eax
     jnz .handle_get_bio
 
+    ; Check GET /video/
+    call check_get_video_route
+    test eax, eax
+    jnz .handle_get_video
+
     call check_admin_route
     test eax, eax
     jnz .route_admin
@@ -672,6 +722,146 @@ _start:
     mov rdi, r15
     syscall
     jmp .child_exit
+
+.handle_get_video:
+    ; Extract filename from "GET /video/FILENAME HTTP..."
+    lea rdi, [rel read_buf]
+    add rdi, str_get_video_len      ; skip "GET /video/"
+    ; Copy filename until space or end, rejecting ".."
+    lea rsi, [rel video_path]
+    ; First, write the directory prefix
+    push rdi
+    lea rdi, [rel video_path]
+    lea rsi, [rel video_dir]
+    mov rcx, video_dir_len
+    rep movsb
+    pop rax                         ; source = filename in request
+    mov rsi, rax
+    mov rcx, 255                    ; max filename length
+.vfn_copy:
+    test rcx, rcx
+    jz .vfn_done
+    lodsb
+    cmp al, ' '
+    je .vfn_done
+    cmp al, 0
+    je .vfn_done
+    cmp al, '.'
+    jne .vfn_not_dot
+    ; Check for ".." path traversal
+    cmp byte [rsi], '.'
+    je .send_404
+.vfn_not_dot:
+    cmp al, '/'
+    je .send_404                    ; no subdirectories
+    stosb
+    dec rcx
+    jmp .vfn_copy
+.vfn_done:
+    mov byte [rdi], 0              ; null-terminate path
+
+    ; Open the video file
+    mov rax, SYS_OPEN
+    lea rdi, [rel video_path]
+    xor esi, esi                   ; O_RDONLY
+    xor edx, edx
+    syscall
+    test rax, rax
+    js .send_404
+
+    mov r13, rax                   ; r13 = video file fd
+
+    ; Get file size via lseek to end
+    mov rax, SYS_LSEEK
+    mov rdi, r13
+    xor esi, esi
+    mov edx, SEEK_END
+    syscall
+    mov r14, rax                   ; r14 = file size
+
+    ; Seek back to start
+    mov rax, SYS_LSEEK
+    mov rdi, r13
+    xor esi, esi
+    xor edx, edx                  ; SEEK_SET
+    syscall
+
+    ; Send HTTP headers
+    pop r15                        ; client fd
+
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel http_200_video_pre]
+    mov rdx, http_200_video_pre_len
+    syscall
+
+    ; Send Content-Length value
+    mov rdi, r14
+    call uint_to_str
+    mov rsi, rax
+    mov rdx, rcx
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    syscall
+
+    ; Send header terminator (CRLFCRLF)
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel crlf]
+    mov rdx, crlf_len
+    syscall
+
+    ; Stream file to socket using resp_buf as transfer buffer
+    mov rbx, r14                   ; remaining bytes
+.video_stream:
+    test rbx, rbx
+    jz .video_done
+
+    ; Read chunk from file
+    mov rax, SYS_READ
+    mov rdi, r13
+    lea rsi, [rel resp_buf]
+    mov rdx, RESP_SIZE
+    cmp rbx, RESP_SIZE
+    jae .vs_read
+    mov rdx, rbx                  ; last chunk may be smaller
+.vs_read:
+    syscall
+    test rax, rax
+    jle .video_done
+
+    mov r14, rax                   ; bytes read
+
+    ; Write chunk to socket
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel resp_buf]
+    mov rdx, r14
+    syscall
+
+    sub rbx, r14
+    jmp .video_stream
+
+.video_done:
+    ; Close video file
+    mov rax, SYS_CLOSE
+    mov rdi, r13
+    syscall
+
+    ; Close client socket
+    mov rax, SYS_CLOSE
+    mov rdi, r15
+    syscall
+    jmp .child_exit
+
+.send_404:
+    mov rax, SYS_WRITE
+    pop rdi
+    push rdi
+    lea rsi, [rel http_404]
+    mov rdx, http_404_len
+    syscall
+    jmp .close_client
 
 .check_post_routes:
     ; Check POST /bio (API)
@@ -1898,7 +2088,7 @@ render_blog:
 
     lea rsi, [rel record_buf + BODY_OFF]
     call strlen_safe
-    call html_escape_append
+    call body_with_video_append
 
     ; Post close - admin gets edit/delete buttons
     test ebx, ebx
@@ -2311,6 +2501,166 @@ html_escape_append:
     jmp .hea_loop
 
 .hea_done:
+    pop r14
+    pop r13
+    pop rbx
+    ret
+
+;; ============================================================
+;; BODY_WITH_VIDEO_APPEND - HTML-escape body but render [video:X] as <video> tags
+;; rsi = source, rcx = source length
+;; r12 = dest pointer in resp_buf (updated)
+;; ============================================================
+body_with_video_append:
+    push rbx
+    push r13
+    push r14
+    push r15
+    push rbp
+    mov r13, rsi            ; source start
+    mov r14, rcx            ; source length
+    xor ebx, ebx            ; source index
+
+.bva_loop:
+    cmp rbx, r14
+    jge .bva_done
+
+    ; Check resp_buf overflow
+    lea rax, [rel resp_buf]
+    add rax, RESP_SIZE - 256
+    cmp r12, rax
+    jae .bva_done
+
+    ; Check if current position starts with [video:
+    lea rax, [r14]
+    sub rax, rbx
+    cmp rax, video_marker_len
+    jb .bva_normal          ; not enough chars remaining
+
+    ; Compare next bytes with "[video:"
+    lea rsi, [r13 + rbx]
+    lea rdi, [rel video_marker]
+    mov rcx, video_marker_len
+    push rbx
+    xor r15d, r15d          ; match flag
+.bva_cmp_marker:
+    test rcx, rcx
+    jz .bva_marker_match
+    mov al, [rsi]
+    cmp al, [rdi]
+    jne .bva_no_marker
+    inc rsi
+    inc rdi
+    dec rcx
+    jmp .bva_cmp_marker
+
+.bva_no_marker:
+    pop rbx
+    jmp .bva_normal
+
+.bva_marker_match:
+    pop rbx
+    ; Found [video: at position rbx
+    ; rsi now points to the filename start (after "[video:")
+    ; Find closing ']'
+    lea r15, [r13 + rbx + video_marker_len]  ; filename start
+    mov rbp, r15                              ; save filename start
+    xor ecx, ecx                              ; filename length
+.bva_find_close:
+    lea rax, [rbx + video_marker_len]
+    add rax, rcx
+    cmp rax, r14
+    jge .bva_normal         ; no closing bracket found, treat as text
+    cmp byte [r15 + rcx], ']'
+    je .bva_emit_video
+    cmp ecx, 255
+    jae .bva_normal         ; filename too long
+    inc ecx
+    jmp .bva_find_close
+
+.bva_emit_video:
+    ; Emit <video src="/video/
+    push rcx                ; save filename length
+    lea rsi, [rel video_tag_open]
+    mov rcx, video_tag_open_len
+    call append_to_resp
+
+    ; Emit filename (already safe - from our own post body, just alphanumeric+dot+dash)
+    pop rcx
+    push rcx
+    mov rsi, rbp
+    call append_to_resp
+
+    ; Emit closing video tag
+    lea rsi, [rel video_tag_close]
+    mov rcx, video_tag_close_len
+    call append_to_resp
+
+    ; Advance source index past [video:filename]
+    pop rcx                 ; filename length
+    add rbx, video_marker_len
+    add rbx, rcx
+    inc rbx                 ; skip ']'
+    jmp .bva_loop
+
+.bva_normal:
+    ; Regular character - HTML escape it
+    movzx eax, byte [r13 + rbx]
+
+    cmp al, '&'
+    je .bva_amp
+    cmp al, '<'
+    je .bva_lt
+    cmp al, '>'
+    je .bva_gt
+    cmp al, '"'
+    je .bva_quot
+
+    ; Normal byte
+    mov byte [r12], al
+    inc r12
+    inc rbx
+    jmp .bva_loop
+
+.bva_amp:
+    lea rsi, [rel ent_amp]
+    mov rcx, ent_amp_len
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+    inc rbx
+    jmp .bva_loop
+
+.bva_lt:
+    lea rsi, [rel ent_lt]
+    mov rcx, ent_lt_len
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+    inc rbx
+    jmp .bva_loop
+
+.bva_gt:
+    lea rsi, [rel ent_gt]
+    mov rcx, ent_gt_len
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+    inc rbx
+    jmp .bva_loop
+
+.bva_quot:
+    lea rsi, [rel ent_quot]
+    mov rcx, ent_quot_len
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+    inc rbx
+    jmp .bva_loop
+
+.bva_done:
+    pop rbp
+    pop r15
     pop r14
     pop r13
     pop rbx
@@ -2959,6 +3309,28 @@ str_to_uint:
     inc rdi
     jmp .stu_loop
 .stu_done:
+    ret
+
+;; ============================================================
+;; CHECK_GET_VIDEO_ROUTE - does request start with "GET /video/"?
+;; Returns: eax = 1 yes, 0 no
+;; ============================================================
+check_get_video_route:
+    lea rdi, [rel read_buf]
+    lea rsi, [rel str_get_video]
+    mov rcx, str_get_video_len
+.cgvr_cmp:
+    test rcx, rcx
+    jz .cgvr_yes
+    cmpsb
+    jne .cgvr_no
+    dec rcx
+    jmp .cgvr_cmp
+.cgvr_yes:
+    mov eax, 1
+    ret
+.cgvr_no:
+    xor eax, eax
     ret
 
 ;; ============================================================
