@@ -521,6 +521,23 @@ section .data
         db '[video:'
     video_marker_len equ 7
 
+    ; URL auto-linking
+    url_marker:
+        db 'https://'
+    url_marker_len equ 8
+
+    url_link_open:
+        db '<a href="'
+    url_link_open_len equ $ - url_link_open
+
+    url_link_mid:
+        db '" style="color:#66b3ff;" target="_blank">'
+    url_link_mid_len equ $ - url_link_mid
+
+    url_link_close:
+        db '</a>'
+    url_link_close_len equ $ - url_link_close
+
     crlf: db 13, 10, 13, 10
     crlf_len equ $ - crlf
 
@@ -3138,7 +3155,7 @@ body_with_video_append:
 
 .bva_no_marker:
     pop rbx
-    jmp .bva_normal
+    jmp .bva_check_url
 
 .bva_marker_match:
     pop rbx
@@ -3183,6 +3200,95 @@ body_with_video_append:
     add rbx, video_marker_len
     add rbx, rcx
     inc rbx                 ; skip ']'
+    jmp .bva_loop
+
+.bva_check_url:
+    ; Check if current position starts with "https://"
+    lea rax, [r14]
+    sub rax, rbx
+    cmp rax, url_marker_len
+    jb .bva_normal
+
+    lea rsi, [r13 + rbx]
+    lea rdi, [rel url_marker]
+    mov rcx, url_marker_len
+    push rbx
+.bva_cmp_url:
+    test rcx, rcx
+    jz .bva_url_match
+    mov al, [rsi]
+    cmp al, [rdi]
+    jne .bva_no_url
+    inc rsi
+    inc rdi
+    dec rcx
+    jmp .bva_cmp_url
+
+.bva_no_url:
+    pop rbx
+    jmp .bva_normal
+
+.bva_url_match:
+    pop rbx
+    ; Found https:// at position rbx
+    ; Scan to end of URL (stop at space, newline, null, or < > " )
+    lea r15, [r13 + rbx]          ; URL start
+    xor ecx, ecx                  ; URL length
+.bva_url_scan:
+    lea rax, [rbx + rcx]
+    cmp rax, r14
+    jge .bva_url_emit
+    movzx eax, byte [r15 + rcx]
+    cmp al, ' '
+    je .bva_url_emit
+    cmp al, 10                    ; newline
+    je .bva_url_emit
+    cmp al, 13                    ; carriage return
+    je .bva_url_emit
+    cmp al, 0
+    je .bva_url_emit
+    cmp al, '<'
+    je .bva_url_emit
+    cmp al, '>'
+    je .bva_url_emit
+    cmp al, '"'
+    je .bva_url_emit
+    inc ecx
+    cmp ecx, 1024
+    jb .bva_url_scan
+
+.bva_url_emit:
+    ; Emit <a href="URL">URL</a>
+    push rcx                      ; save URL length
+    lea rsi, [rel url_link_open]
+    mov rcx, url_link_open_len
+    call append_to_resp
+
+    ; Emit URL as href value
+    pop rcx
+    push rcx
+    mov rsi, r15
+    call append_to_resp
+
+    ; Emit mid tag
+    lea rsi, [rel url_link_mid]
+    mov rcx, url_link_mid_len
+    call append_to_resp
+
+    ; Emit URL as display text
+    pop rcx
+    push rcx
+    mov rsi, r15
+    call append_to_resp
+
+    ; Emit close tag
+    lea rsi, [rel url_link_close]
+    mov rcx, url_link_close_len
+    call append_to_resp
+
+    ; Advance past URL
+    pop rcx
+    add rbx, rcx
     jmp .bva_loop
 
 .bva_normal:
