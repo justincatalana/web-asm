@@ -93,6 +93,7 @@ section .data
     bio_path:    db "/data/bio.txt", 0
     video_dir:   db "/data/videos/", 0
     video_dir_len equ $ - video_dir - 1
+    slugs_path:  db "/data/slugs.txt", 0
 
     default_bio:
         db 'Served by hand-crafted x86-64 assembly. '
@@ -135,6 +136,10 @@ section .data
     str_get_video:
         db 'GET /video/', 0
     str_get_video_len equ $ - str_get_video - 1
+
+    str_get_posts:
+        db 'GET /posts/', 0
+    str_get_posts_len equ $ - str_get_posts - 1
 
     str_post_bio:
         db 'POST /bio', 0
@@ -272,6 +277,16 @@ section .data
     html_no_posts:
         db '<p style="color:#666;">[no posts yet. the void stares back.]</p>'
     html_no_posts_len equ $ - html_no_posts
+
+    ; Single post page: header links back to blog
+    html_single_head_link:
+        db '</h1><p style="margin-top:-10px;"><a href="/" style="color:#66b3ff;'
+        db 'text-decoration:none;">&larr; all posts</a></p></div>'
+    html_single_head_link_len equ $ - html_single_head_link
+
+    html_single_404:
+        db '<p style="color:#666;">[post not found. the void stares back.]</p>'
+    html_single_404_len equ $ - html_single_404
 
     ; Bio editor form (split around token value and bio text)
     bio_form_pre:
@@ -543,6 +558,10 @@ section .bss
     blog_name       resb 128
     blog_name_len   resq 1
     video_path      resb 512
+    ; Slug table: 32 entries, each 72 bytes (64 slug + 8 index)
+    slug_table      resb 2304
+    slug_count      resq 1
+    slug_file_buf   resb 2048
     date_buf        resb 32
 
 section .text
@@ -568,6 +587,7 @@ _start:
     call load_token
     call load_blog_name
     call db_init
+    call load_slugs
 
     ; Create socket
     mov rax, SYS_SOCKET
@@ -691,6 +711,11 @@ _start:
     test eax, eax
     jnz .handle_get_video
 
+    ; Check GET /posts/<slug>
+    call check_get_posts_route
+    test eax, eax
+    jnz .handle_get_post
+
     call check_admin_route
     test eax, eax
     jnz .route_admin
@@ -722,6 +747,29 @@ _start:
     mov rdi, r15
     syscall
     jmp .child_exit
+
+.handle_get_post:
+    ; Extract slug from "GET /posts/SLUG HTTP..."
+    lea rdi, [rel read_buf]
+    add rdi, str_get_posts_len      ; skip "GET /posts/"
+
+    ; Find slug by scanning the slug table
+    call find_slug                  ; rdi = slug start; returns rax = record index, -1 if not found
+    cmp rax, -1
+    je .slug_not_found
+
+    ; Validate index < post_count
+    cmp rax, [rel post_count]
+    jae .slug_not_found
+
+    mov rdi, rax
+    call render_single_post
+    jmp .send_response
+
+.slug_not_found:
+    ; Render a 404-ish page (still 200 with "not found" message for simplicity)
+    call render_slug_404
+    jmp .send_response
 
 .handle_get_video:
     ; Extract filename from "GET /video/FILENAME HTTP..."
@@ -1398,6 +1446,216 @@ load_blog_name:
     mov byte [rdi], 0
 
 .name_done:
+    pop r12
+    pop rbx
+    ret
+
+;; ============================================================
+;; LOAD_SLUGS - read /data/slugs.txt and populate slug_table
+;; File format: one "slug index\n" per line
+;; Slug table: 32 entries, each 72 bytes (64 slug string + 8 index)
+;; ============================================================
+load_slugs:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov qword [rel slug_count], 0
+
+    ; Open slugs file
+    mov rax, SYS_OPEN
+    lea rdi, [rel slugs_path]
+    xor esi, esi                   ; O_RDONLY
+    xor edx, edx
+    syscall
+    test rax, rax
+    js .ls_done                    ; no file = no slugs, that's fine
+
+    mov r12, rax                   ; r12 = fd
+
+    ; Read file
+    mov rax, SYS_READ
+    mov rdi, r12
+    lea rsi, [rel slug_file_buf]
+    mov rdx, 2047
+    syscall
+    mov r13, rax                   ; r13 = bytes read
+
+    ; Close file
+    push r13
+    mov rax, SYS_CLOSE
+    mov rdi, r12
+    syscall
+    pop r13
+
+    test r13, r13
+    jle .ls_done
+
+    ; Null-terminate
+    lea rdi, [rel slug_file_buf]
+    mov byte [rdi + r13], 0
+
+    ; Parse lines: "slug index\n"
+    lea r14, [rel slug_file_buf]   ; current parse position
+    lea r15, [rel slug_table]      ; current slug entry
+
+.ls_parse_line:
+    cmp byte [r14], 0
+    je .ls_done
+    cmp byte [r14], 10             ; skip empty lines
+    jne .ls_read_slug
+    inc r14
+    jmp .ls_parse_line
+
+.ls_read_slug:
+    ; Copy slug until space
+    mov rdi, r15                   ; dest = slug entry string
+    xor ecx, ecx                  ; char count
+.ls_slug_char:
+    mov al, [r14]
+    cmp al, ' '
+    je .ls_slug_end
+    cmp al, 0
+    je .ls_done
+    cmp al, 10
+    je .ls_done                    ; malformed line, skip
+    cmp ecx, 63
+    jae .ls_skip_line              ; slug too long
+    mov [rdi + rcx], al
+    inc ecx
+    inc r14
+    jmp .ls_slug_char
+
+.ls_slug_end:
+    mov byte [rdi + rcx], 0        ; null-terminate slug
+    inc r14                        ; skip space
+
+    ; Parse index number
+    xor eax, eax
+    mov rbx, 10
+.ls_parse_num:
+    movzx ecx, byte [r14]
+    cmp cl, '0'
+    jb .ls_num_done
+    cmp cl, '9'
+    ja .ls_num_done
+    imul rax, rbx
+    sub cl, '0'
+    movzx ecx, cl
+    add rax, rcx
+    inc r14
+    jmp .ls_parse_num
+
+.ls_num_done:
+    ; Store index at offset 64 in the entry
+    mov [r15 + 64], rax
+
+    ; Advance to next entry
+    add r15, 72
+    inc qword [rel slug_count]
+    cmp qword [rel slug_count], 32
+    jae .ls_done
+
+    ; Skip to next line
+    cmp byte [r14], 10
+    jne .ls_maybe_end
+    inc r14
+.ls_maybe_end:
+    jmp .ls_parse_line
+
+.ls_skip_line:
+    ; Skip rest of line
+    mov al, [r14]
+    cmp al, 0
+    je .ls_done
+    cmp al, 10
+    je .ls_skip_nl
+    inc r14
+    jmp .ls_skip_line
+.ls_skip_nl:
+    inc r14
+    jmp .ls_parse_line
+
+.ls_done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+;; ============================================================
+;; FIND_SLUG - look up slug in slug_table
+;; rdi = slug string from URL (terminated by space, null, or '?')
+;; Returns: rax = record index, or -1 if not found
+;; ============================================================
+find_slug:
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov r12, rdi                   ; slug from URL
+    lea r13, [rel slug_table]
+    mov r14, [rel slug_count]
+    xor ebx, ebx                  ; entry index
+
+.fs_loop:
+    cmp rbx, r14
+    jge .fs_not_found
+
+    ; Compare slug from URL with table entry
+    mov rsi, r12                   ; URL slug
+    lea rdi, [r13 + rbx * 8]      ; can't do *72, need to calculate
+    ; Calculate entry address: slug_table + ebx * 72
+    mov rax, rbx
+    imul rax, 72
+    lea rdi, [r13 + rax]          ; entry slug string
+
+    ; Compare character by character
+    xor ecx, ecx
+.fs_cmp:
+    mov al, [rsi + rcx]
+    ; URL slug terminates at space, null, or '?'
+    cmp al, ' '
+    je .fs_url_end
+    cmp al, 0
+    je .fs_url_end
+    cmp al, '?'
+    je .fs_url_end
+
+    cmp al, [rdi + rcx]
+    jne .fs_next
+    inc ecx
+    cmp ecx, 63
+    jae .fs_next                  ; too long
+    jmp .fs_cmp
+
+.fs_url_end:
+    ; URL slug ended - check that table slug also ends here
+    cmp byte [rdi + rcx], 0
+    jne .fs_next
+
+    ; Match! Return the index
+    mov rax, rbx
+    imul rax, 72
+    mov rax, [r13 + rax + 64]     ; load record index from entry
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.fs_next:
+    inc rbx
+    jmp .fs_loop
+
+.fs_not_found:
+    mov rax, -1
+    pop r14
+    pop r13
     pop r12
     pop rbx
     ret
@@ -2181,6 +2439,213 @@ render_blog:
     pop r15
     pop r14
     pop r13
+    pop r12
+    pop rbx
+    ret
+
+;; ============================================================
+;; RENDER_SINGLE_POST - render a page for one post by record index
+;; rdi = record index
+;; Returns: rax = HTML length in resp_buf
+;; ============================================================
+render_single_post:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r14, rdi                   ; save record index
+    lea r12, [rel resp_buf]
+
+    ; HTML head
+    lea rsi, [rel html_head_pre]
+    mov rcx, html_head_pre_len
+    call append_to_resp
+
+    ; Read the record first so we can use the title in <title>
+    mov rax, r14
+    imul rax, RECORD_SIZE
+    add rax, DATA_START
+
+    push rax
+    mov rax, SYS_LSEEK
+    mov rdi, [rel db_fd]
+    pop rsi
+    xor edx, edx
+    syscall
+
+    mov rax, SYS_READ
+    mov rdi, [rel db_fd]
+    lea rsi, [rel record_buf]
+    mov rdx, RECORD_SIZE
+    syscall
+
+    ; Use post title in <title> tag
+    lea rsi, [rel record_buf + TITLE_OFF]
+    call strlen_safe
+    call html_escape_append
+
+    ; Rest of head
+    lea rsi, [rel html_head_mid]
+    mov rcx, html_head_mid_len
+    call append_to_resp
+
+    ; Blog name as h1
+    lea rsi, [rel blog_name]
+    mov rcx, [rel blog_name_len]
+    call append_to_resp
+
+    ; Back link instead of bio
+    lea rsi, [rel html_single_head_link]
+    mov rcx, html_single_head_link_len
+    call append_to_resp
+
+    ; Check if post exists (non-empty title)
+    cmp byte [rel record_buf + TITLE_OFF], 0
+    je .rsp_not_found
+
+    ; Render the post
+    lea rsi, [rel html_post_open]
+    mov rcx, html_post_open_len
+    call append_to_resp
+
+    ; Title
+    lea rsi, [rel record_buf + TITLE_OFF]
+    call strlen_safe
+    call html_escape_append
+
+    lea rsi, [rel html_title_close]
+    mov rcx, html_title_close_len
+    call append_to_resp
+
+    ; Timestamp
+    mov rdi, [rel record_buf + 8]
+    call format_epoch
+    call append_to_resp
+
+    lea rsi, [rel html_ts_close]
+    mov rcx, html_ts_close_len
+    call append_to_resp
+
+    ; Body with video support
+    lea rsi, [rel record_buf + BODY_OFF]
+    call strlen_safe
+    call body_with_video_append
+
+    ; Close post
+    lea rsi, [rel html_post_close]
+    mov rcx, html_post_close_len
+    call append_to_resp
+
+    jmp .rsp_footer
+
+.rsp_not_found:
+    lea rsi, [rel html_single_404]
+    mov rcx, html_single_404_len
+    call append_to_resp
+
+.rsp_footer:
+    lea rsi, [rel html_tail_pre]
+    mov rcx, html_tail_pre_len
+    call append_to_resp
+
+    lea rsi, [rel blog_name]
+    mov rcx, [rel blog_name_len]
+    call append_to_resp
+
+    lea rsi, [rel html_tail_post]
+    mov rcx, html_tail_post_len
+    call append_to_resp
+
+    ; Visible post count
+    mov rdi, [rel visible_count]
+    call uint_to_str
+    mov rsi, rax
+    call append_to_resp
+
+    cmp qword [rel visible_count], 1
+    jne .rsp_plural
+    lea rsi, [rel html_end_singular]
+    mov rcx, html_end_singular_len
+    jmp .rsp_end
+.rsp_plural:
+    lea rsi, [rel html_end_plural]
+    mov rcx, html_end_plural_len
+.rsp_end:
+    call append_to_resp
+
+    lea rax, [rel resp_buf]
+    sub r12, rax
+    mov rax, r12
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+;; ============================================================
+;; RENDER_SLUG_404 - render a not-found page for bad slug
+;; Returns: rax = HTML length in resp_buf
+;; ============================================================
+render_slug_404:
+    push rbx
+    push r12
+
+    lea r12, [rel resp_buf]
+
+    lea rsi, [rel html_head_pre]
+    mov rcx, html_head_pre_len
+    call append_to_resp
+
+    lea rsi, [rel blog_name]
+    mov rcx, [rel blog_name_len]
+    call append_to_resp
+
+    lea rsi, [rel html_head_mid]
+    mov rcx, html_head_mid_len
+    call append_to_resp
+
+    lea rsi, [rel blog_name]
+    mov rcx, [rel blog_name_len]
+    call append_to_resp
+
+    lea rsi, [rel html_single_head_link]
+    mov rcx, html_single_head_link_len
+    call append_to_resp
+
+    lea rsi, [rel html_single_404]
+    mov rcx, html_single_404_len
+    call append_to_resp
+
+    lea rsi, [rel html_tail_pre]
+    mov rcx, html_tail_pre_len
+    call append_to_resp
+
+    lea rsi, [rel blog_name]
+    mov rcx, [rel blog_name_len]
+    call append_to_resp
+
+    lea rsi, [rel html_tail_post]
+    mov rcx, html_tail_post_len
+    call append_to_resp
+
+    ; Just show "0 posts" for the not-found footer
+    mov rdi, 0
+    call uint_to_str
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel html_end_plural]
+    mov rcx, html_end_plural_len
+    call append_to_resp
+
+    lea rax, [rel resp_buf]
+    sub r12, rax
+    mov rax, r12
+
     pop r12
     pop rbx
     ret
@@ -3315,6 +3780,28 @@ str_to_uint:
 ;; CHECK_GET_VIDEO_ROUTE - does request start with "GET /video/"?
 ;; Returns: eax = 1 yes, 0 no
 ;; ============================================================
+;; ============================================================
+;; CHECK_GET_POSTS_ROUTE - does request start with "GET /posts/"?
+;; Returns: eax = 1 yes, 0 no
+;; ============================================================
+check_get_posts_route:
+    lea rdi, [rel read_buf]
+    lea rsi, [rel str_get_posts]
+    mov rcx, str_get_posts_len
+.cgpr_cmp:
+    test rcx, rcx
+    jz .cgpr_yes
+    cmpsb
+    jne .cgpr_no
+    dec rcx
+    jmp .cgpr_cmp
+.cgpr_yes:
+    mov eax, 1
+    ret
+.cgpr_no:
+    xor eax, eax
+    ret
+
 check_get_video_route:
     lea rdi, [rel read_buf]
     lea rsi, [rel str_get_video]
