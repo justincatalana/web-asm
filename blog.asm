@@ -489,6 +489,19 @@ section .data
         db 'Not Found'
     http_404_len equ $ - http_404
 
+    ; Title link (split around slug)
+    title_link_open:
+        db '<a href="/posts/'
+    title_link_open_len equ $ - title_link_open
+
+    title_link_mid:
+        db '" style="color:inherit;text-decoration:none;">'
+    title_link_mid_len equ $ - title_link_mid
+
+    title_link_close:
+        db '</a>'
+    title_link_close_len equ $ - title_link_close
+
     ; Video embed tag (split around filename)
     video_tag_open:
         db '<div class="vid"><video onplay="this.parentNode.classList.add('
@@ -1679,6 +1692,62 @@ find_slug:
     ret
 
 ;; ============================================================
+;; LOOKUP_SLUG_BY_INDEX - find slug string for a record index
+;; rdi = record index
+;; Returns: rax = slug string ptr, rcx = slug length (or rax=0)
+;; ============================================================
+lookup_slug_by_index:
+    push rbx
+    push r12
+    push r13
+
+    mov r12, rdi                   ; target index
+    lea r13, [rel slug_table]
+    mov rbx, [rel slug_count]
+    xor ecx, ecx                   ; entry counter
+
+.lsi_loop:
+    cmp rcx, rbx
+    jge .lsi_not_found
+
+    ; Calculate entry address: slug_table + ecx * 72
+    mov rax, rcx
+    imul rax, 72
+    ; Check if this entry's index matches
+    cmp r12, [r13 + rax + 64]
+    je .lsi_found
+    inc rcx
+    jmp .lsi_loop
+
+.lsi_found:
+    ; rax = offset into slug_table for this entry
+    lea rax, [r13 + rax]          ; pointer to slug string
+    ; Calculate slug string length
+    push rax
+    mov rdi, rax
+    xor rcx, rcx
+.lsi_slen:
+    cmp byte [rdi + rcx], 0
+    je .lsi_slen_done
+    inc rcx
+    cmp rcx, 63
+    jb .lsi_slen
+.lsi_slen_done:
+    pop rax
+    ; rax = slug ptr, rcx = slug len
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+.lsi_not_found:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+;; ============================================================
 ;; FIND_ENV_VAR - search envp for a prefix
 ;; rdi = prefix, rsi = prefix length
 ;; Returns: rax = ptr to value, rcx = value length, or rax=0
@@ -2346,10 +2415,40 @@ render_blog:
     call append_to_resp
 
 .post_title:
+    ; Check if this post has a slug
+    mov rdi, r14                   ; current record index
+    call lookup_slug_by_index      ; returns rax = slug ptr, rcx = slug len (or rax=0)
+    test rax, rax
+    jz .title_no_link
+
+    ; Has slug: <a href="/posts/SLUG" style="...">
+    push rax
+    push rcx
+    lea rsi, [rel title_link_open]
+    mov rcx, title_link_open_len
+    call append_to_resp
+    pop rcx
+    pop rsi
+    call append_to_resp            ; slug string
+    lea rsi, [rel title_link_mid]
+    mov rcx, title_link_mid_len
+    call append_to_resp
+
     lea rsi, [rel record_buf + TITLE_OFF]
     call strlen_safe
     call html_escape_append
 
+    lea rsi, [rel title_link_close]
+    mov rcx, title_link_close_len
+    call append_to_resp
+    jmp .title_done
+
+.title_no_link:
+    lea rsi, [rel record_buf + TITLE_OFF]
+    call strlen_safe
+    call html_escape_append
+
+.title_done:
     lea rsi, [rel html_title_close]
     mov rcx, html_title_close_len
     call append_to_resp
