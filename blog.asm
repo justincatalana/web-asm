@@ -812,8 +812,40 @@ _start:
 
     test rax, rax
     jle .close_client
+    mov r14, rax                ; total bytes read
     lea rdi, [rel read_buf]
-    mov byte [rdi + rax], 0
+    mov byte [rdi + r14], 0
+
+    ; For POST requests, ensure the body has arrived.
+    ; Proxies may send headers and body as separate TCP segments.
+    cmp byte [rdi], 'P'
+    jne .read_complete
+    push rdi
+    call find_body              ; find \r\n\r\n
+    test rax, rax
+    jz .read_no_retry           ; no separator, proceed anyway
+    cmp byte [rax], 0           ; body data after separator?
+    jne .read_no_retry          ; yes, body present
+    ; Body not yet received — read again
+    pop rdi
+    pop rdi                     ; client fd
+    push rdi
+    lea rsi, [rel read_buf]
+    add rsi, r14
+    mov rdx, BUF_SIZE - 1
+    sub rdx, r14
+    jle .read_complete          ; buffer full
+    mov rax, SYS_READ
+    syscall
+    test rax, rax
+    jle .read_complete          ; timeout/error, proceed with what we have
+    add r14, rax
+    lea rdi, [rel read_buf]
+    mov byte [rdi + r14], 0
+    jmp .read_complete
+.read_no_retry:
+    pop rdi
+.read_complete:
 
     ; Route: POST, GET /admin, GET /bio, or public
     cmp byte [rdi], 'P'
