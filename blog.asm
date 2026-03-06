@@ -449,6 +449,15 @@ section .data
         db 13, 10
     http_200_plain_len equ $ - http_200_plain
 
+    http_200_plain_cl:
+        db 'HTTP/1.1 200 OK', 13, 10
+        db 'Content-Type: text/plain; charset=utf-8', 13, 10
+        db 'Connection: close', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'X-Frame-Options: DENY', 13, 10
+        db 'Content-Length: '
+    http_200_plain_cl_len equ $ - http_200_plain_cl
+
     http_200_bio_updated:
         db 'HTTP/1.1 200 OK', 13, 10
         db 'Content-Type: text/plain; charset=utf-8', 13, 10
@@ -671,6 +680,7 @@ section .bss
     slug_count      resq 1
     slug_file_buf   resb 2048
     date_buf        resb 32
+    kudos_body_buf  resb 32
 
 section .text
     global _start
@@ -1123,17 +1133,42 @@ _start:
     ; Unlock database
     call unlock_db
 
-    ; Build full response in resp_buf (single write avoids proxy race)
+    ; Convert count to body string and save in kudos_body_buf
+    mov rdi, r13
+    call uint_to_str               ; rax = ptr, rcx = len
+    mov rsi, rax
+    lea rdi, [rel kudos_body_buf]
+    mov r13, rcx                   ; r13 = body length
+    rep movsb
+
+    ; Build full response in resp_buf with Content-Length
     lea r12, [rel resp_buf]
-    lea rsi, [rel http_200_plain]
-    mov rcx, http_200_plain_len
+
+    ; Headers (includes "Content-Length: ")
+    lea rsi, [rel http_200_plain_cl]
+    mov rcx, http_200_plain_cl_len
     mov rdi, r12
     rep movsb
     mov r12, rdi
 
-    mov rdi, r13                   ; new kudos count
+    ; Content-Length value
+    mov rdi, r13
     call uint_to_str
     mov rsi, rax
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+
+    ; CRLF CRLF (end headers)
+    mov byte [r12], 13
+    mov byte [r12+1], 10
+    mov byte [r12+2], 13
+    mov byte [r12+3], 10
+    add r12, 4
+
+    ; Body
+    lea rsi, [rel kudos_body_buf]
+    mov rcx, r13
     mov rdi, r12
     rep movsb
     mov r12, rdi
@@ -1217,17 +1252,42 @@ _start:
 
     call unlock_db
 
-    ; Build full response in resp_buf (single write avoids proxy race)
+    ; Convert count to body string and save in kudos_body_buf
+    mov rdi, r13
+    call uint_to_str
+    mov rsi, rax
+    lea rdi, [rel kudos_body_buf]
+    mov r13, rcx                   ; r13 = body length
+    rep movsb
+
+    ; Build full response in resp_buf with Content-Length
     lea r12, [rel resp_buf]
-    lea rsi, [rel http_200_plain]
-    mov rcx, http_200_plain_len
+
+    ; Headers (includes "Content-Length: ")
+    lea rsi, [rel http_200_plain_cl]
+    mov rcx, http_200_plain_cl_len
     mov rdi, r12
     rep movsb
     mov r12, rdi
 
+    ; Content-Length value
     mov rdi, r13
     call uint_to_str
     mov rsi, rax
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+
+    ; CRLF CRLF (end headers)
+    mov byte [r12], 13
+    mov byte [r12+1], 10
+    mov byte [r12+2], 13
+    mov byte [r12+3], 10
+    add r12, 4
+
+    ; Body
+    lea rsi, [rel kudos_body_buf]
+    mov rcx, r13
     mov rdi, r12
     rep movsb
     mov r12, rdi
