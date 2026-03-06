@@ -1123,19 +1123,26 @@ _start:
     ; Unlock database
     call unlock_db
 
-    ; Send response: HTTP 200 plain + new count as text
-    pop r15                        ; client fd
-
-    mov rax, SYS_WRITE
-    mov rdi, r15
+    ; Build full response in resp_buf (single write avoids proxy race)
+    lea r12, [rel resp_buf]
     lea rsi, [rel http_200_plain]
-    mov rdx, http_200_plain_len
-    syscall
+    mov rcx, http_200_plain_len
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
 
     mov rdi, r13                   ; new kudos count
     call uint_to_str
     mov rsi, rax
-    mov rdx, rcx
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+
+    ; Send entire response in one write
+    lea rsi, [rel resp_buf]
+    mov rdx, r12
+    sub rdx, rsi
+    pop r15                        ; client fd
     mov rax, SYS_WRITE
     mov rdi, r15
     syscall
@@ -1210,17 +1217,26 @@ _start:
 
     call unlock_db
 
-    pop r15
-    mov rax, SYS_WRITE
-    mov rdi, r15
+    ; Build full response in resp_buf (single write avoids proxy race)
+    lea r12, [rel resp_buf]
     lea rsi, [rel http_200_plain]
-    mov rdx, http_200_plain_len
-    syscall
+    mov rcx, http_200_plain_len
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
 
     mov rdi, r13
     call uint_to_str
     mov rsi, rax
-    mov rdx, rcx
+    mov rdi, r12
+    rep movsb
+    mov r12, rdi
+
+    ; Send entire response in one write
+    lea rsi, [rel resp_buf]
+    mov rdx, r12
+    sub rdx, rsi
+    pop r15                        ; client fd
     mov rax, SYS_WRITE
     mov rdi, r15
     syscall
