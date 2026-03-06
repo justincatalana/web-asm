@@ -544,7 +544,7 @@ section .data
         db '}else{'
         db 'var n=(+el.dataset.n)+1;'
         db 'el.dataset.n=n;'
-        db "el.textContent='Kudos ('+n+')';"
+        db "el.textContent='Remove Kudos ('+n+')';"
         db "el.style.color='#2a7fc1';"
         db "sessionStorage.setItem('k'+id,'1');"
         db "fetch('/kudos',{method:'POST',"
@@ -553,7 +553,7 @@ section .data
         db '}}'
         db "document.querySelectorAll('.kudos').forEach(function(el){"
         db "if(sessionStorage.getItem('k'+el.dataset.id)){"
-        db "el.textContent='Kudos ('+el.dataset.n+')';"
+        db "el.textContent='Remove Kudos ('+el.dataset.n+')';"
         db "el.style.color='#2a7fc1';}});"
         db '</script>'
     kudos_script_len equ $ - kudos_script
