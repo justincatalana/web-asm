@@ -167,6 +167,10 @@ section .data
         db 'POST /kudos', 0
     str_post_kudos_len equ $ - str_post_kudos - 1
 
+    str_post_unkudos:
+        db 'POST /unkudos', 0
+    str_post_unkudos_len equ $ - str_post_unkudos - 1
+
     ; Form param strings
     str_title_eq:  db 'title=', 0
     str_body_eq:   db 'body=', 0
@@ -519,16 +523,25 @@ section .data
         db '<script>'
         db 'function giveKudos(el){'
         db 'var id=el.dataset.id;'
-        db "if(sessionStorage.getItem('k'+id))return;"
-        db "sessionStorage.setItem('k'+id,'1');"
+        db "if(sessionStorage.getItem('k'+id)){"
+        db 'var n=Math.max(0,(+el.dataset.n)-1);'
+        db 'el.dataset.n=n;'
+        db "el.textContent='Give Kudos ('+n+')';"
+        db "el.style.color='#999';"
+        db "sessionStorage.removeItem('k'+id);"
+        db "fetch('/unkudos',{method:'POST',"
+        db "body:'id='+id,"
+        db "headers:{'Content-Type':'application/x-www-form-urlencoded'}});"
+        db '}else{'
         db 'var n=(+el.dataset.n)+1;'
         db 'el.dataset.n=n;'
         db "el.textContent='Kudos ('+n+')';"
         db "el.style.color='#2a7fc1';"
+        db "sessionStorage.setItem('k'+id,'1');"
         db "fetch('/kudos',{method:'POST',"
         db "body:'id='+id,"
         db "headers:{'Content-Type':'application/x-www-form-urlencoded'}});"
-        db '}'
+        db '}}'
         db "document.querySelectorAll('.kudos').forEach(function(el){"
         db "if(sessionStorage.getItem('k'+el.dataset.id)){"
         db "el.textContent='Kudos ('+el.dataset.n+')';"
@@ -1012,6 +1025,11 @@ _start:
     test eax, eax
     jnz .handle_post_kudos
 
+    ; Check POST /unkudos (no auth required)
+    call check_post_unkudos_route
+    test eax, eax
+    jnz .handle_post_unkudos
+
     ; Check POST /bio (API)
     call check_post_bio_route
     test eax, eax
@@ -1115,6 +1133,91 @@ _start:
     syscall
 
     mov rdi, r13                   ; new kudos count
+    call uint_to_str
+    mov rsi, rax
+    mov rdx, rcx
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    syscall
+
+    mov rax, SYS_CLOSE
+    mov rdi, r15
+    syscall
+    jmp .child_exit
+
+.handle_post_unkudos:
+    ; Find body of request
+    lea rdi, [rel read_buf]
+    call find_body
+    test rax, rax
+    jz .close_client
+    mov r13, rax
+
+    ; Parse id=
+    mov rdi, r13
+    lea rsi, [rel str_id_eq]
+    call find_param_in_str
+    test rax, rax
+    jz .close_client
+
+    mov rdi, rax
+    call str_to_uint
+    mov r14, rax
+
+    cmp r14, [rel post_count]
+    jae .close_client
+
+    call lock_db
+
+    mov rax, r14
+    imul rax, RECORD_SIZE
+    add rax, DATA_START
+    add rax, KUDOS_OFF
+    mov r15, rax
+
+    mov rax, SYS_LSEEK
+    mov rdi, [rel db_fd]
+    mov rsi, r15
+    xor edx, edx
+    syscall
+
+    mov rax, SYS_READ
+    mov rdi, [rel db_fd]
+    lea rsi, [rel num_buf]
+    mov rdx, 8
+    syscall
+
+    ; Decrement (floor at 0)
+    mov rax, [rel num_buf]
+    test rax, rax
+    jz .unkudos_write
+    dec rax
+.unkudos_write:
+    mov [rel num_buf], rax
+    mov r13, rax
+
+    mov rax, SYS_LSEEK
+    mov rdi, [rel db_fd]
+    mov rsi, r15
+    xor edx, edx
+    syscall
+
+    mov rax, SYS_WRITE
+    mov rdi, [rel db_fd]
+    lea rsi, [rel num_buf]
+    mov rdx, 8
+    syscall
+
+    call unlock_db
+
+    pop r15
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel http_200_plain]
+    mov rdx, http_200_plain_len
+    syscall
+
+    mov rdi, r13
     call uint_to_str
     mov rsi, rax
     mov rdx, rcx
@@ -4246,6 +4349,28 @@ check_post_kudos_route:
     mov eax, 1
     ret
 .cpkr_no:
+    xor eax, eax
+    ret
+
+;; ============================================================
+;; CHECK_POST_UNKUDOS_ROUTE - "POST /unkudos"?
+;; Returns: eax = 1 yes, 0 no
+;; ============================================================
+check_post_unkudos_route:
+    lea rdi, [rel read_buf]
+    lea rsi, [rel str_post_unkudos]
+    mov rcx, str_post_unkudos_len
+.cpukr_cmp:
+    test rcx, rcx
+    jz .cpukr_yes
+    cmpsb
+    jne .cpukr_no
+    dec rcx
+    jmp .cpukr_cmp
+.cpukr_yes:
+    mov eax, 1
+    ret
+.cpukr_no:
     xor eax, eax
     ret
 
