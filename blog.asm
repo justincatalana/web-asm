@@ -51,6 +51,7 @@
 %define INDEX_SIZE      (INDEX_BUCKETS * 8)
 %define DATA_START      (HEADER_SIZE + INDEX_SIZE)
 %define MAX_POSTS       1024
+%define KUDOS_OFF       4088
 %define LISTEN_PORT     0x901F          ; htons(8080)
 %define BUF_SIZE        8192
 %define RESP_SIZE       65536
@@ -162,6 +163,10 @@ section .data
         db 'POST /edit-post', 0
     str_post_edit_len equ $ - str_post_edit - 1
 
+    str_post_kudos:
+        db 'POST /kudos', 0
+    str_post_kudos_len equ $ - str_post_kudos - 1
+
     ; Form param strings
     str_title_eq:  db 'title=', 0
     str_body_eq:   db 'body=', 0
@@ -204,6 +209,7 @@ section .data
         db 'border-left:22px solid #fff;border-top:13px solid transparent;'
         db 'border-bottom:13px solid transparent;z-index:2;pointer-events:none;}'
         db '.vid.p::before,.vid.p::after{display:none;}'
+        db '.kudos:hover{color:#2a7fc1!important;}'
         db 'form{background:#fff;border:1px solid #ddd;padding:20px;margin:20px 0;}'
         db 'input,textarea{width:100%;background:#fff;color:#333;'
         db 'border:1px solid #ccc;padding:8px;margin:5px 0 15px 0;'
@@ -488,6 +494,47 @@ section .data
         db 13, 10
         db 'Not Found'
     http_404_len equ $ - http_404
+
+    ; Kudos display (split around post index and count)
+    kudos_pre:
+        db '<div style="text-align:right;margin-top:5px;font-size:0.85em;">'
+        db '<span class="kudos" data-id="'
+    kudos_pre_len equ $ - kudos_pre
+
+    kudos_mid1:
+        db '" data-n="'
+    kudos_mid1_len equ $ - kudos_mid1
+
+    kudos_mid2:
+        db '" onclick="giveKudos(this)" style="cursor:pointer;color:#999;">'
+        db 'Give Kudos ('
+    kudos_mid2_len equ $ - kudos_mid2
+
+    kudos_post:
+        db ')</span></div>'
+    kudos_post_len equ $ - kudos_post
+
+    ; Kudos JavaScript
+    kudos_script:
+        db '<script>'
+        db 'function giveKudos(el){'
+        db 'var id=el.dataset.id;'
+        db "if(sessionStorage.getItem('k'+id))return;"
+        db "sessionStorage.setItem('k'+id,'1');"
+        db 'var n=(+el.dataset.n)+1;'
+        db 'el.dataset.n=n;'
+        db "el.textContent='Kudos ('+n+')';"
+        db "el.style.color='#2a7fc1';"
+        db "fetch('/kudos',{method:'POST',"
+        db "body:'id='+id,"
+        db "headers:{'Content-Type':'application/x-www-form-urlencoded'}});"
+        db '}'
+        db "document.querySelectorAll('.kudos').forEach(function(el){"
+        db "if(sessionStorage.getItem('k'+el.dataset.id)){"
+        db "el.textContent='Kudos ('+el.dataset.n+')';"
+        db "el.style.color='#2a7fc1';}});"
+        db '</script>'
+    kudos_script_len equ $ - kudos_script
 
     ; Title link (split around slug)
     title_link_open:
@@ -960,6 +1007,11 @@ _start:
     jmp .close_client
 
 .check_post_routes:
+    ; Check POST /kudos (no auth required)
+    call check_post_kudos_route
+    test eax, eax
+    jnz .handle_post_kudos
+
     ; Check POST /bio (API)
     call check_post_bio_route
     test eax, eax
@@ -981,6 +1033,99 @@ _start:
     jnz .handle_post_edit
 
     jmp .route_post
+
+.handle_post_kudos:
+    ; Find body of request
+    lea rdi, [rel read_buf]
+    call find_body
+    test rax, rax
+    jz .close_client
+    mov r13, rax
+
+    ; Parse id=
+    mov rdi, r13
+    lea rsi, [rel str_id_eq]
+    call find_param_in_str
+    test rax, rax
+    jz .close_client
+
+    ; Convert id to integer
+    mov rdi, rax
+    call str_to_uint
+    mov r14, rax                   ; r14 = post index
+
+    ; Validate index
+    cmp r14, [rel post_count]
+    jae .close_client
+
+    ; Lock database
+    call lock_db
+
+    ; Calculate file offset for kudos: DATA_START + id*RECORD_SIZE + KUDOS_OFF
+    mov rax, r14
+    imul rax, RECORD_SIZE
+    add rax, DATA_START
+    add rax, KUDOS_OFF
+    mov r15, rax                   ; save offset
+
+    ; Seek to kudos position
+    mov rax, SYS_LSEEK
+    mov rdi, [rel db_fd]
+    mov rsi, r15
+    xor edx, edx
+    syscall
+
+    ; Read current kudos count (8 bytes)
+    mov rax, SYS_READ
+    mov rdi, [rel db_fd]
+    lea rsi, [rel num_buf]
+    mov rdx, 8
+    syscall
+
+    ; Increment
+    mov rax, [rel num_buf]
+    inc rax
+    mov [rel num_buf], rax
+    mov r13, rax                   ; save new count
+
+    ; Seek back
+    mov rax, SYS_LSEEK
+    mov rdi, [rel db_fd]
+    mov rsi, r15
+    xor edx, edx
+    syscall
+
+    ; Write new count
+    mov rax, SYS_WRITE
+    mov rdi, [rel db_fd]
+    lea rsi, [rel num_buf]
+    mov rdx, 8
+    syscall
+
+    ; Unlock database
+    call unlock_db
+
+    ; Send response: HTTP 200 plain + new count as text
+    pop r15                        ; client fd
+
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel http_200_plain]
+    mov rdx, http_200_plain_len
+    syscall
+
+    mov rdi, r13                   ; new kudos count
+    call uint_to_str
+    mov rsi, rax
+    mov rdx, rcx
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    syscall
+
+    mov rax, SYS_CLOSE
+    mov rdi, r15
+    syscall
+    jmp .child_exit
 
 .handle_post_bio:
     ; Require auth
@@ -2482,6 +2627,39 @@ render_blog:
     call strlen_safe
     call body_with_video_append
 
+    ; Kudos display
+    lea rsi, [rel kudos_pre]
+    mov rcx, kudos_pre_len
+    call append_to_resp
+
+    mov rdi, r14                   ; post index
+    call uint_to_str
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel kudos_mid1]
+    mov rcx, kudos_mid1_len
+    call append_to_resp
+
+    ; Emit kudos count from record
+    mov rdi, [rel record_buf + KUDOS_OFF]
+    call uint_to_str
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel kudos_mid2]
+    mov rcx, kudos_mid2_len
+    call append_to_resp
+
+    mov rdi, [rel record_buf + KUDOS_OFF]
+    call uint_to_str
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel kudos_post]
+    mov rcx, kudos_post_len
+    call append_to_resp
+
     ; Post close - admin gets edit/delete buttons
     test ebx, ebx
     jz .public_post_close
@@ -2538,6 +2716,11 @@ render_blog:
     call append_to_resp
 
 .no_admin_script:
+    ; Kudos script (always included)
+    lea rsi, [rel kudos_script]
+    mov rcx, kudos_script_len
+    call append_to_resp
+
     lea rsi, [rel html_tail_pre]
     mov rcx, html_tail_pre_len
     call append_to_resp
@@ -2667,6 +2850,38 @@ render_single_post:
     call strlen_safe
     call body_with_video_append
 
+    ; Kudos display
+    lea rsi, [rel kudos_pre]
+    mov rcx, kudos_pre_len
+    call append_to_resp
+
+    mov rdi, r14                   ; post index
+    call uint_to_str
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel kudos_mid1]
+    mov rcx, kudos_mid1_len
+    call append_to_resp
+
+    mov rdi, [rel record_buf + KUDOS_OFF]
+    call uint_to_str
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel kudos_mid2]
+    mov rcx, kudos_mid2_len
+    call append_to_resp
+
+    mov rdi, [rel record_buf + KUDOS_OFF]
+    call uint_to_str
+    mov rsi, rax
+    call append_to_resp
+
+    lea rsi, [rel kudos_post]
+    mov rcx, kudos_post_len
+    call append_to_resp
+
     ; Close post
     lea rsi, [rel html_post_close]
     mov rcx, html_post_close_len
@@ -2680,6 +2895,11 @@ render_single_post:
     call append_to_resp
 
 .rsp_footer:
+    ; Kudos script
+    lea rsi, [rel kudos_script]
+    mov rcx, kudos_script_len
+    call append_to_resp
+
     lea rsi, [rel html_tail_pre]
     mov rcx, html_tail_pre_len
     call append_to_resp
@@ -4007,6 +4227,28 @@ str_to_uint:
 ;; CHECK_GET_POSTS_ROUTE - does request start with "GET /posts/"?
 ;; Returns: eax = 1 yes, 0 no
 ;; ============================================================
+;; ============================================================
+;; CHECK_POST_KUDOS_ROUTE - "POST /kudos"?
+;; Returns: eax = 1 yes, 0 no
+;; ============================================================
+check_post_kudos_route:
+    lea rdi, [rel read_buf]
+    lea rsi, [rel str_post_kudos]
+    mov rcx, str_post_kudos_len
+.cpkr_cmp:
+    test rcx, rcx
+    jz .cpkr_yes
+    cmpsb
+    jne .cpkr_no
+    dec rcx
+    jmp .cpkr_cmp
+.cpkr_yes:
+    mov eax, 1
+    ret
+.cpkr_no:
+    xor eax, eax
+    ret
+
 check_get_posts_route:
     lea rdi, [rel read_buf]
     lea rsi, [rel str_get_posts]
