@@ -499,6 +499,28 @@ section .data
         db 'Content-Length: '
     http_200_video_pre_len equ $ - http_200_video_pre
 
+    http_200_png_pre:
+        db 'HTTP/1.1 200 OK', 13, 10
+        db 'Content-Type: image/png', 13, 10
+        db 'Connection: close', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'Cache-Control: public, max-age=86400', 13, 10
+        db 'Content-Length: '
+    http_200_png_pre_len equ $ - http_200_png_pre
+
+    http_200_jpg_pre:
+        db 'HTTP/1.1 200 OK', 13, 10
+        db 'Content-Type: image/jpeg', 13, 10
+        db 'Connection: close', 13, 10
+        db 'X-Content-Type-Options: nosniff', 13, 10
+        db 'Cache-Control: public, max-age=86400', 13, 10
+        db 'Content-Length: '
+    http_200_jpg_pre_len equ $ - http_200_jpg_pre
+
+    ext_png: db '.png', 0
+    ext_jpg: db '.jpg', 0
+    ext_jpeg: db '.jpeg', 0
+
     http_404:
         db 'HTTP/1.1 404 Not Found', 13, 10
         db 'Content-Type: text/plain', 13, 10
@@ -589,6 +611,38 @@ section .data
     video_marker:
         db '[video:'
     video_marker_len equ 7
+
+    ; Image embed tag (split around filename)
+    image_tag_open:
+        db '<img src="/video/'
+    image_tag_open_len equ $ - image_tag_open
+
+    image_tag_close:
+        db '" style="max-width:100%;border-radius:4px;margin:10px 0;" />'
+    image_tag_close_len equ $ - image_tag_close
+
+    ; Marker for image embed in post body
+    image_marker:
+        db '[image:'
+    image_marker_len equ 7
+
+    ; Code block tags
+    code_open_marker:
+        db '[code]'
+    code_open_marker_len equ 6
+
+    code_close_marker:
+        db '[/code]'
+    code_close_marker_len equ 7
+
+    code_block_open:
+        db '<div style="background:#f5f5f5;border:1px solid #ddd;border-radius:4px;'
+        db 'padding:12px;margin:10px 0;overflow-x:auto;font-size:0.85em;">'
+    code_block_open_len equ $ - code_block_open
+
+    code_block_close:
+        db '</div>'
+    code_block_close_len equ $ - code_block_close
 
     ; URL auto-linking
     url_marker:
@@ -984,13 +1038,38 @@ _start:
     xor edx, edx                  ; SEEK_SET
     syscall
 
-    ; Send HTTP headers
+    ; Send HTTP headers - detect content type by extension
     pop r15                        ; client fd
 
-    mov rax, SYS_WRITE
-    mov rdi, r15
+    ; Check for .png extension
+    lea rdi, [rel video_path]
+    call detect_png_ext
+    test eax, eax
+    jnz .use_png_header
+
+    ; Check for .jpg extension
+    lea rdi, [rel video_path]
+    call detect_jpg_ext
+    test eax, eax
+    jnz .use_jpg_header
+
+    ; Default: video/mp4
     lea rsi, [rel http_200_video_pre]
     mov rdx, http_200_video_pre_len
+    jmp .send_media_header
+
+.use_png_header:
+    lea rsi, [rel http_200_png_pre]
+    mov rdx, http_200_png_pre_len
+    jmp .send_media_header
+
+.use_jpg_header:
+    lea rsi, [rel http_200_jpg_pre]
+    mov rdx, http_200_jpg_pre_len
+
+.send_media_header:
+    mov rax, SYS_WRITE
+    mov rdi, r15
     syscall
 
     ; Send Content-Length value
@@ -3586,7 +3665,7 @@ body_with_video_append:
 
 .bva_no_marker:
     pop rbx
-    jmp .bva_check_url
+    jmp .bva_check_image
 
 .bva_marker_match:
     pop rbx
@@ -3631,6 +3710,139 @@ body_with_video_append:
     add rbx, video_marker_len
     add rbx, rcx
     inc rbx                 ; skip ']'
+    jmp .bva_loop
+
+.bva_check_image:
+    ; Check if current position starts with [image:
+    lea rax, [r14]
+    sub rax, rbx
+    cmp rax, image_marker_len
+    jb .bva_check_code_open
+
+    lea rsi, [r13 + rbx]
+    lea rdi, [rel image_marker]
+    mov rcx, image_marker_len
+    push rbx
+.bva_cmp_img:
+    test rcx, rcx
+    jz .bva_img_match
+    mov al, [rsi]
+    cmp al, [rdi]
+    jne .bva_no_img
+    inc rsi
+    inc rdi
+    dec rcx
+    jmp .bva_cmp_img
+
+.bva_no_img:
+    pop rbx
+    jmp .bva_check_code_open
+
+.bva_img_match:
+    pop rbx
+    ; Found [image: at position rbx - find closing ']'
+    lea r15, [r13 + rbx + image_marker_len]
+    mov rbp, r15
+    xor ecx, ecx
+.bva_img_find_close:
+    lea rax, [rbx + image_marker_len]
+    add rax, rcx
+    cmp rax, r14
+    jge .bva_check_code_open
+    cmp byte [r15 + rcx], ']'
+    je .bva_emit_image
+    cmp ecx, 255
+    jae .bva_check_code_open
+    inc ecx
+    jmp .bva_img_find_close
+
+.bva_emit_image:
+    push rcx
+    lea rsi, [rel image_tag_open]
+    mov rcx, image_tag_open_len
+    call append_to_resp
+
+    pop rcx
+    push rcx
+    mov rsi, rbp
+    call append_to_resp
+
+    lea rsi, [rel image_tag_close]
+    mov rcx, image_tag_close_len
+    call append_to_resp
+
+    pop rcx
+    add rbx, image_marker_len
+    add rbx, rcx
+    inc rbx                 ; skip ']'
+    jmp .bva_loop
+
+.bva_check_code_open:
+    ; Check if current position starts with [code]
+    lea rax, [r14]
+    sub rax, rbx
+    cmp rax, code_open_marker_len
+    jb .bva_check_code_close
+
+    lea rsi, [r13 + rbx]
+    lea rdi, [rel code_open_marker]
+    mov rcx, code_open_marker_len
+    push rbx
+.bva_cmp_code_open:
+    test rcx, rcx
+    jz .bva_code_open_match
+    mov al, [rsi]
+    cmp al, [rdi]
+    jne .bva_no_code_open
+    inc rsi
+    inc rdi
+    dec rcx
+    jmp .bva_cmp_code_open
+
+.bva_no_code_open:
+    pop rbx
+    jmp .bva_check_code_close
+
+.bva_code_open_match:
+    pop rbx
+    lea rsi, [rel code_block_open]
+    mov rcx, code_block_open_len
+    call append_to_resp
+    add rbx, code_open_marker_len
+    jmp .bva_loop
+
+.bva_check_code_close:
+    ; Check if current position starts with [/code]
+    lea rax, [r14]
+    sub rax, rbx
+    cmp rax, code_close_marker_len
+    jb .bva_check_url
+
+    lea rsi, [r13 + rbx]
+    lea rdi, [rel code_close_marker]
+    mov rcx, code_close_marker_len
+    push rbx
+.bva_cmp_code_close:
+    test rcx, rcx
+    jz .bva_code_close_match
+    mov al, [rsi]
+    cmp al, [rdi]
+    jne .bva_no_code_close
+    inc rsi
+    inc rdi
+    dec rcx
+    jmp .bva_cmp_code_close
+
+.bva_no_code_close:
+    pop rbx
+    jmp .bva_check_url
+
+.bva_code_close_match:
+    pop rbx
+    lea rsi, [rel code_block_close]
+    mov rcx, code_block_close_len
+    call append_to_resp
+    add rbx, code_close_marker_len
     jmp .bva_loop
 
 .bva_check_url:
@@ -4428,6 +4640,99 @@ str_to_uint:
     inc rdi
     jmp .stu_loop
 .stu_done:
+    ret
+
+;; ============================================================
+;; DETECT_PNG_EXT - check if null-terminated path ends with ".png"
+;; rdi = path string
+;; Returns: eax = 1 if .png, 0 otherwise
+;; ============================================================
+detect_png_ext:
+    push rbx
+    mov rbx, rdi
+    ; Find end of string
+    xor ecx, ecx
+.dpe_len:
+    cmp byte [rbx + rcx], 0
+    je .dpe_check
+    inc ecx
+    cmp ecx, 512
+    jb .dpe_len
+    jmp .dpe_no
+.dpe_check:
+    cmp ecx, 4
+    jb .dpe_no
+    ; Compare last 4 bytes with ".png"
+    lea rdi, [rbx + rcx - 4]
+    cmp byte [rdi], '.'
+    jne .dpe_no
+    cmp byte [rdi+1], 'p'
+    jne .dpe_no
+    cmp byte [rdi+2], 'n'
+    jne .dpe_no
+    cmp byte [rdi+3], 'g'
+    jne .dpe_no
+    mov eax, 1
+    pop rbx
+    ret
+.dpe_no:
+    xor eax, eax
+    pop rbx
+    ret
+
+;; ============================================================
+;; DETECT_JPG_EXT - check if null-terminated path ends with ".jpg" or ".jpeg"
+;; rdi = path string
+;; Returns: eax = 1 if .jpg/.jpeg, 0 otherwise
+;; ============================================================
+detect_jpg_ext:
+    push rbx
+    mov rbx, rdi
+    xor ecx, ecx
+.dje_len:
+    cmp byte [rbx + rcx], 0
+    je .dje_check
+    inc ecx
+    cmp ecx, 512
+    jb .dje_len
+    jmp .dje_no
+.dje_check:
+    ; Check .jpg (4 chars)
+    cmp ecx, 4
+    jb .dje_no
+    lea rdi, [rbx + rcx - 4]
+    cmp byte [rdi], '.'
+    jne .dje_try_jpeg
+    cmp byte [rdi+1], 'j'
+    jne .dje_try_jpeg
+    cmp byte [rdi+2], 'p'
+    jne .dje_try_jpeg
+    cmp byte [rdi+3], 'g'
+    jne .dje_try_jpeg
+    mov eax, 1
+    pop rbx
+    ret
+.dje_try_jpeg:
+    ; Check .jpeg (5 chars)
+    cmp ecx, 5
+    jb .dje_no
+    lea rdi, [rbx + rcx - 5]
+    cmp byte [rdi], '.'
+    jne .dje_no
+    cmp byte [rdi+1], 'j'
+    jne .dje_no
+    cmp byte [rdi+2], 'p'
+    jne .dje_no
+    cmp byte [rdi+3], 'e'
+    jne .dje_no
+    cmp byte [rdi+4], 'g'
+    jne .dje_no
+    mov eax, 1
+    pop rbx
+    ret
+.dje_no:
+    xor eax, eax
+    pop rbx
     ret
 
 ;; ============================================================
