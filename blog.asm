@@ -94,6 +94,8 @@ section .data
     bio_path:    db "/data/bio.txt", 0
     video_dir:   db "/data/videos/", 0
     video_dir_len equ $ - video_dir - 1
+    image_dir:   db "/data/images/", 0
+    image_dir_len equ $ - image_dir - 1
     slugs_path:  db "/data/slugs.txt", 0
 
     default_bio:
@@ -137,6 +139,10 @@ section .data
     str_get_video:
         db 'GET /video/', 0
     str_get_video_len equ $ - str_get_video - 1
+
+    str_get_image:
+        db 'GET /image/', 0
+    str_get_image_len equ $ - str_get_image - 1
 
     str_get_posts:
         db 'GET /posts/', 0
@@ -614,7 +620,7 @@ section .data
 
     ; Image embed tag (split around filename)
     image_tag_open:
-        db '<img src="/video/'
+        db '<img src="/image/'
     image_tag_open_len equ $ - image_tag_open
 
     image_tag_close:
@@ -729,6 +735,7 @@ section .bss
     blog_name       resb 128
     blog_name_len   resq 1
     video_path      resb 512
+    image_path      resb 512
     ; Slug table: 32 entries, each 72 bytes (64 slug + 8 index)
     slug_table      resb 2304
     slug_count      resq 1
@@ -914,6 +921,11 @@ _start:
     call check_get_video_route
     test eax, eax
     jnz .handle_get_video
+
+    ; Check GET /image/
+    call check_get_image_route
+    test eax, eax
+    jnz .handle_get_image
 
     ; Check GET /posts/<slug>
     call check_get_posts_route
@@ -1126,6 +1138,145 @@ _start:
     syscall
 
     ; Close client socket
+    mov rax, SYS_CLOSE
+    mov rdi, r15
+    syscall
+    jmp .child_exit
+
+.handle_get_image:
+    ; Extract filename from "GET /image/FILENAME HTTP..."
+    lea rdi, [rel read_buf]
+    add rdi, str_get_image_len      ; skip "GET /image/"
+    push rdi
+    lea rdi, [rel image_path]
+    lea rsi, [rel image_dir]
+    mov rcx, image_dir_len
+    rep movsb
+    pop rax
+    mov rsi, rax
+    mov rcx, 255
+.ifn_copy:
+    test rcx, rcx
+    jz .ifn_done
+    lodsb
+    cmp al, ' '
+    je .ifn_done
+    cmp al, 0
+    je .ifn_done
+    cmp al, '.'
+    jne .ifn_not_dot
+    cmp byte [rsi], '.'
+    je .send_404
+.ifn_not_dot:
+    cmp al, '/'
+    je .send_404
+    stosb
+    dec rcx
+    jmp .ifn_copy
+.ifn_done:
+    mov byte [rdi], 0
+
+    ; Open the image file
+    mov rax, SYS_OPEN
+    lea rdi, [rel image_path]
+    xor esi, esi
+    xor edx, edx
+    syscall
+    test rax, rax
+    js .send_404
+
+    mov r13, rax
+
+    ; Get file size
+    mov rax, SYS_LSEEK
+    mov rdi, r13
+    xor esi, esi
+    mov edx, SEEK_END
+    syscall
+    mov r14, rax
+
+    ; Seek back to start
+    mov rax, SYS_LSEEK
+    mov rdi, r13
+    xor esi, esi
+    xor edx, edx
+    syscall
+
+    ; Detect content type by extension
+    pop r15                        ; client fd
+
+    lea rdi, [rel image_path]
+    call detect_png_ext
+    test eax, eax
+    jnz .img_use_png
+
+    lea rdi, [rel image_path]
+    call detect_jpg_ext
+    test eax, eax
+    jnz .img_use_jpg
+
+    ; Default to png
+    lea rsi, [rel http_200_png_pre]
+    mov rdx, http_200_png_pre_len
+    jmp .img_send_header
+
+.img_use_png:
+    lea rsi, [rel http_200_png_pre]
+    mov rdx, http_200_png_pre_len
+    jmp .img_send_header
+
+.img_use_jpg:
+    lea rsi, [rel http_200_jpg_pre]
+    mov rdx, http_200_jpg_pre_len
+
+.img_send_header:
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    syscall
+
+    mov rdi, r14
+    call uint_to_str
+    mov rsi, rax
+    mov rdx, rcx
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    syscall
+
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel crlf]
+    mov rdx, crlf_len
+    syscall
+
+    ; Stream file to socket
+    mov rbx, r14
+.image_stream:
+    test rbx, rbx
+    jz .image_done
+    mov rax, SYS_READ
+    mov rdi, r13
+    lea rsi, [rel resp_buf]
+    mov rdx, RESP_SIZE
+    cmp rbx, RESP_SIZE
+    jae .is_read
+    mov rdx, rbx
+.is_read:
+    syscall
+    test rax, rax
+    jle .image_done
+    mov r14, rax
+    mov rax, SYS_WRITE
+    mov rdi, r15
+    lea rsi, [rel resp_buf]
+    mov rdx, r14
+    syscall
+    sub rbx, r14
+    jmp .image_stream
+
+.image_done:
+    mov rax, SYS_CLOSE
+    mov rdi, r13
+    syscall
     mov rax, SYS_CLOSE
     mov rdi, r15
     syscall
@@ -4820,6 +4971,24 @@ check_get_video_route:
     mov eax, 1
     ret
 .cgvr_no:
+    xor eax, eax
+    ret
+
+check_get_image_route:
+    lea rdi, [rel read_buf]
+    lea rsi, [rel str_get_image]
+    mov rcx, str_get_image_len
+.cgir_cmp:
+    test rcx, rcx
+    jz .cgir_yes
+    cmpsb
+    jne .cgir_no
+    dec rcx
+    jmp .cgir_cmp
+.cgir_yes:
+    mov eax, 1
+    ret
+.cgir_no:
     xor eax, eax
     ret
 
